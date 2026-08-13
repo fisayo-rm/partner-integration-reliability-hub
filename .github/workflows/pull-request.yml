@@ -1,0 +1,42 @@
+name: Pull request
+
+on:
+  pull_request: {}
+
+permissions:
+  contents: read
+
+jobs:
+  stage-a:
+    name: Stage A engineering baseline
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v5
+      - name: Set up Node 24
+        uses: actions/setup-node@v5
+        with:
+          node-version: 24
+          cache: pnpm
+      - name: Set up pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 10.18.2
+      - name: Install with frozen lockfile
+        run: pnpm install --frozen-lockfile
+      - name: Format check
+        run: pnpm format:check
+      - name: Lint
+        run: pnpm lint
+      - name: TypeScript compile
+        run: pnpm typecheck
+      - name: Architecture dependency test
+        run: pnpm architecture
+      - name: Unit tests
+        run: pnpm test
+      - name: Build all workspaces
+        run: pnpm build
+      - name: High-severity dependency audit
+        run: pnpm audit
+      - name: Source and configuration secret scan
+        run: pnpm secret:scan

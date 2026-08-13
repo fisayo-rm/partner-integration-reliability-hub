@@ -1,0 +1,26 @@
+# Dependencies and generated outputs
+node_modules/
+dist/
+coverage/
+playwright-report/
+test-results/
+.turbo/
+.cache/
+*.tsbuildinfo
+
+# Local configuration and operating-system metadata
+.env
+.env.local
+.env.*.local
+!.env.example
+!.nvmrc
+.DS_Store
+
+# Agent-facing planning and execution material is intentionally untracked.
+AGENTS.md
+.agents/
+.codex/
+baselines/
+implementation/
+decisions/
+planning/

@@ -1,0 +1,13 @@
+node_modules/
+dist/
+coverage/
+playwright-report/
+test-results/
+.git/
+baselines/
+implementation/
+decisions/
+planning/
+.agents/
+.codex/
+*.tsbuildinfo

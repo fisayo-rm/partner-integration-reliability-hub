@@ -1,0 +1,9 @@
+{
+  "name": "@pirh/delivery-worker",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "build": "tsc --build"
+  }
+}

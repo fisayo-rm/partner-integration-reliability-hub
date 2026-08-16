@@ -1,0 +1,225 @@
+name: partner-integration-reliability-hub
+
+x-node-build: &node-build
+  context: .
+  dockerfile: infrastructure/docker/Dockerfile.node
+
+x-placeholder: &placeholder
+  image: pirh-m01-node:local
+  restart: on-failure:3
+  command: ["node", "infrastructure/docker/placeholder-server.mjs"]
+
+services:
+  dynamodb-local:
+    image: amazon/dynamodb-local:2.5.2
+    # The fresh named volume is root-owned; DynamoDB Local must create its SQLite file.
+    user: "0:0"
+    command:
+      [
+        "-jar",
+        "DynamoDBLocal.jar",
+        "-sharedDb",
+        "-dbPath",
+        "/home/dynamodblocal/data",
+      ]
+    working_dir: /home/dynamodblocal
+    volumes: ["dynamodb-data:/home/dynamodblocal/data"]
+    ports: ["8000:8000"]
+    healthcheck:
+      test:
+        [
+          "CMD-SHELL",
+          "curl -s -o /dev/null -w '%{http_code}' http://localhost:8000/ | grep -Eq '^(200|400)$'",
+        ]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
+  elasticmq:
+    image: softwaremill/elasticmq-native:1.5.7
+    command: ["-Dconfig.file=/opt/elasticmq.conf"]
+    volumes:
+      [
+        "./infrastructure/docker/elasticmq/elasticmq.conf:/opt/elasticmq.conf:ro",
+      ]
+    ports: ["9324:9324"]
+    healthcheck:
+      test:
+        [
+          "CMD-SHELL",
+          "wget -q -O /dev/null --post-data='Action=ListQueues&Version=2012-11-05' http://localhost:9324/",
+        ]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
+  keycloak:
+    image: quay.io/keycloak/keycloak:26.0.7
+    command: ["start-dev", "--import-realm"]
+    environment:
+      KC_BOOTSTRAP_ADMIN_USERNAME: local-admin
+      KC_BOOTSTRAP_ADMIN_PASSWORD: local-admin-demo-only
+      KC_HEALTH_ENABLED: "true"
+    volumes: ["./infrastructure/docker/keycloak:/opt/keycloak/data/import:ro"]
+    ports: ["8080:8080"]
+    healthcheck:
+      test: ["CMD-SHELL", "test -f /opt/keycloak/conf/keycloak.conf"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
+  bootstrap:
+    image: amazon/aws-cli:2.17.62
+    depends_on:
+      dynamodb-local: { condition: service_healthy }
+      elasticmq: { condition: service_healthy }
+    restart: on-failure:5
+    environment:
+      AWS_ACCESS_KEY_ID: local
+      AWS_SECRET_ACCESS_KEY: local
+      AWS_REGION: us-east-1
+      AWS_DEFAULT_REGION: us-east-1
+      AWS_PAGER: ""
+      DYNAMODB_ENDPOINT: http://dynamodb-local:8000
+      ELASTICMQ_ENDPOINT: http://elasticmq:9324
+      CORE_TABLE_NAME: pirh-core-local
+      AUDIT_TABLE_NAME: pirh-audit-local
+      ROUTING_QUEUE_NAME: pirh-routing-local
+      ROUTING_DLQ_NAME: pirh-routing-infra-dlq-local
+      DELIVERY_QUEUE_NAME: pirh-delivery-local
+      DELIVERY_DLQ_NAME: pirh-delivery-infra-dlq-local
+    volumes: ["./infrastructure/docker/bootstrap:/bootstrap:ro"]
+    entrypoint: ["/bin/sh", "/bootstrap/bootstrap.sh"]
+
+  api:
+    image: pirh-m01-node:local
+    build: *node-build
+    command: ["pnpm", "--filter", "@pirh/api", "start"]
+    restart: on-failure:3
+    depends_on:
+      bootstrap: { condition: service_completed_successfully }
+    environment:
+      APP_ENV: local
+      API_HOST: 0.0.0.0
+      API_PORT: "3000"
+      DYNAMODB_ENDPOINT: http://dynamodb-local:8000
+      ELASTICMQ_ENDPOINT: http://elasticmq:9324
+    ports: ["3000:3000"]
+    healthcheck:
+      test:
+        [
+          "CMD-SHELL",
+          'node -e "fetch(''http://localhost:3000/health/ready'').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"',
+        ]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
+  console:
+    image: nginx:1.27.2-alpine
+    restart: on-failure:3
+    volumes: ["./apps/console/public:/usr/share/nginx/html:ro"]
+    ports: ["5173:80"]
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q -O /dev/null http://localhost/ || exit 1"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
+  outbox-worker:
+    <<: *placeholder
+    depends_on: { bootstrap: { condition: service_completed_successfully } }
+    environment: { PORT: "3001", SERVICE_NAME: outbox-worker }
+  router-worker:
+    <<: *placeholder
+    depends_on: { bootstrap: { condition: service_completed_successfully } }
+    environment: { PORT: "3002", SERVICE_NAME: router-worker }
+  delivery-worker:
+    <<: *placeholder
+    depends_on: { bootstrap: { condition: service_completed_successfully } }
+    environment: { PORT: "3003", SERVICE_NAME: delivery-worker }
+  outbox-reconciler:
+    <<: *placeholder
+    depends_on: { bootstrap: { condition: service_completed_successfully } }
+    environment: { PORT: "3004", SERVICE_NAME: outbox-reconciler }
+  mock-partner-alpha:
+    <<: *placeholder
+    environment: { PORT: "4011", SERVICE_NAME: mock-partner-alpha }
+    ports: ["4011:4011"]
+    healthcheck:
+      test:
+        [
+          "CMD-SHELL",
+          'node -e "fetch(''http://localhost:4011/health/ready'').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"',
+        ]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+  mock-partner-beta:
+    <<: *placeholder
+    environment: { PORT: "4012", SERVICE_NAME: mock-partner-beta }
+    ports: ["4012:4012"]
+    healthcheck:
+      test:
+        [
+          "CMD-SHELL",
+          'node -e "fetch(''http://localhost:4012/health/ready'').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"',
+        ]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
+  otel-collector:
+    image: otel/opentelemetry-collector-contrib:0.111.0
+    profiles: ["observability"]
+    command: ["--config=/etc/otelcol-contrib/config.yaml"]
+    volumes:
+      [
+        "./infrastructure/docker/observability/otel-collector.yaml:/etc/otelcol-contrib/config.yaml:ro",
+      ]
+    ports: ["4318:4318", "13133:13133"]
+  prometheus:
+    image: prom/prometheus:v2.55.1
+    profiles: ["observability"]
+    command:
+      [
+        "--config.file=/etc/prometheus/prometheus.yml",
+        "--storage.tsdb.path=/prometheus",
+      ]
+    volumes:
+      [
+        "./infrastructure/docker/observability/prometheus.yml:/etc/prometheus/prometheus.yml:ro",
+        "prometheus-data:/prometheus",
+      ]
+    ports: ["9090:9090"]
+  loki:
+    image: grafana/loki:3.2.1
+    profiles: ["observability"]
+    command: ["-config.file=/etc/loki/local-config.yaml"]
+    volumes:
+      [
+        "./infrastructure/docker/observability/loki.yml:/etc/loki/local-config.yaml:ro",
+        "loki-data:/loki",
+      ]
+    ports: ["3100:3100"]
+  jaeger:
+    image: jaegertracing/all-in-one:1.63.0
+    profiles: ["observability"]
+    ports: ["16686:16686"]
+  grafana:
+    image: grafana/grafana:11.3.0
+    profiles: ["observability"]
+    environment:
+      { GF_AUTH_ANONYMOUS_ENABLED: "true", GF_AUTH_ANONYMOUS_ORG_ROLE: Viewer }
+    volumes:
+      [
+        "./infrastructure/docker/observability/grafana-datasources.yaml:/etc/grafana/provisioning/datasources/datasources.yaml:ro",
+        "grafana-data:/var/lib/grafana",
+      ]
+    ports: ["3001:3000"]
+
+volumes:
+  dynamodb-data: {}
+  prometheus-data: {}
+  loki-data: {}
+  grafana-data: {}

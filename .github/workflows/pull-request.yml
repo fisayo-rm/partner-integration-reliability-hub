@@ -40,3 +40,22 @@ jobs:
         run: pnpm audit
       - name: Source and configuration secret scan
         run: pnpm secret:scan
+  local-platform:
+    name: Local platform smoke
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v5
+      - name: Set up Node 24
+        uses: actions/setup-node@v5
+        with:
+          node-version: 24
+          cache: pnpm
+      - name: Set up pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 10.18.2
+      - name: Install with frozen lockfile
+        run: pnpm install --frozen-lockfile
+      - name: Verify Compose topology
+        run: pnpm local:verify

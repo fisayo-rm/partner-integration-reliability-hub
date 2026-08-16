@@ -1,0 +1,56 @@
+{
+  "realm": "pirh-local",
+  "enabled": true,
+  "displayName": "Partner Integration Reliability Hub Local",
+  "roles": {
+    "realm": [{ "name": "admin" }, { "name": "operator" }, { "name": "viewer" }]
+  },
+  "clients": [
+    {
+      "clientId": "pirh-console",
+      "name": "PIRH local console",
+      "publicClient": true,
+      "protocol": "openid-connect",
+      "redirectUris": ["http://localhost:5173/*"],
+      "webOrigins": ["http://localhost:5173"],
+      "standardFlowEnabled": true,
+      "directAccessGrantsEnabled": true
+    }
+  ],
+  "users": [
+    {
+      "username": "admin@example.test",
+      "enabled": true,
+      "emailVerified": true,
+      "email": "admin@example.test",
+      "realmRoles": ["admin"],
+      "credentials": [
+        { "type": "password", "value": "admin-demo-only", "temporary": false }
+      ]
+    },
+    {
+      "username": "operator@example.test",
+      "enabled": true,
+      "emailVerified": true,
+      "email": "operator@example.test",
+      "realmRoles": ["operator"],
+      "credentials": [
+        {
+          "type": "password",
+          "value": "operator-demo-only",
+          "temporary": false
+        }
+      ]
+    },
+    {
+      "username": "viewer@example.test",
+      "enabled": true,
+      "emailVerified": true,
+      "email": "viewer@example.test",
+      "realmRoles": ["viewer"],
+      "credentials": [
+        { "type": "password", "value": "viewer-demo-only", "temporary": false }
+      ]
+    }
+  ]
+}

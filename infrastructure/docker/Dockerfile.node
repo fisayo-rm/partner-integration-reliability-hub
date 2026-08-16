@@ -1,0 +1,11 @@
+FROM node:24.11.1-alpine3.21
+WORKDIR /workspace
+RUN corepack enable
+COPY package.json pnpm-lock.yaml pnpm-workspace.yaml .npmrc tsconfig.base.json tsconfig.build.json ./
+COPY apps ./apps
+COPY packages ./packages
+COPY scripts ./scripts
+COPY eslint.config.mjs vitest.config.ts playwright.config.ts ./
+RUN pnpm install --frozen-lockfile && pnpm build
+COPY infrastructure/docker/placeholder-server.mjs ./infrastructure/docker/placeholder-server.mjs
+CMD ["node", "infrastructure/docker/placeholder-server.mjs"]

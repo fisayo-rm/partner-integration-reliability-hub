@@ -1,18 +1,9 @@
 {
   "files": [],
   "references": [
-    { "path": "./apps/api" },
-    { "path": "./apps/console" },
-    { "path": "./apps/outbox-worker" },
-    { "path": "./apps/router-worker" },
-    { "path": "./apps/delivery-worker" },
-    { "path": "./apps/outbox-reconciler" },
-    { "path": "./apps/mock-partner-alpha" },
-    { "path": "./apps/mock-partner-beta" },
-    { "path": "./apps/config-cli" },
     { "path": "./packages/domain" },
-    { "path": "./packages/application" },
     { "path": "./packages/contracts" },
+    { "path": "./packages/application" },
     { "path": "./packages/persistence" },
     { "path": "./packages/queue" },
     { "path": "./packages/auth" },
@@ -22,6 +13,15 @@
     { "path": "./packages/observability" },
     { "path": "./packages/config" },
     { "path": "./packages/config-portability" },
-    { "path": "./packages/test-support" }
+    { "path": "./packages/test-support" },
+    { "path": "./apps/api" },
+    { "path": "./apps/console" },
+    { "path": "./apps/outbox-worker" },
+    { "path": "./apps/router-worker" },
+    { "path": "./apps/delivery-worker" },
+    { "path": "./apps/outbox-reconciler" },
+    { "path": "./apps/mock-partner-alpha" },
+    { "path": "./apps/mock-partner-beta" },
+    { "path": "./apps/config-cli" }
   ]
 }

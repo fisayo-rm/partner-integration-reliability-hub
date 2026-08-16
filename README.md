@@ -8,7 +8,7 @@ business behavior, API contracts, Docker Compose, and local services begin in M0
 
 - Node.js 24.x (`node --version` must satisfy `>=24 <25`)
 - Corepack enabled (`corepack enable`)
-- Docker with the Compose plugin is required from M01, not for M00 verification
+- Docker with the Compose plugin; M01 is verified with Colima on macOS
 
 ## Clean-clone setup and verification
 
@@ -34,6 +34,30 @@ pnpm build
 pnpm secret:scan
 pnpm audit
 ```
+
+## Local platform (M01)
+
+Start Colima before using Docker on macOS:
+
+```bash
+colima start
+docker compose up --build
+# or include local telemetry services
+docker compose --profile observability up --build
+```
+
+The local environment uses disposable Docker volumes, DynamoDB Local, ElasticMQ,
+Keycloak, health-only mock partners, and service placeholders. The M01 smoke suite
+checks both profiles and removes its isolated containers and volumes afterwards:
+
+```bash
+pnpm local:verify
+pnpm local:down
+```
+
+The Keycloak users in `.env.example` are local-demo-only identities. No business
+event processing, authenticated API behavior, partner delivery, or transformations
+exist yet; they begin in later milestones.
 
 ## Repository boundaries
 

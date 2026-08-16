@@ -2,7 +2,7 @@ import { readFile } from "node:fs/promises";
 import { expect, test } from "vitest";
 import { parse } from "yaml";
 
-test("pull-request workflow runs the M00 Stage A checks", async () => {
+test("pull-request workflow runs Stage A and the M01 local platform smoke", async () => {
   const workflow = parse(
     await readFile(
       new URL("../../.github/workflows/pull-request.yml", import.meta.url),
@@ -11,7 +11,7 @@ test("pull-request workflow runs the M00 Stage A checks", async () => {
   );
   const jobs = workflow.jobs;
   expect(workflow.on.pull_request).toEqual({});
-  expect(Object.keys(jobs)).toEqual(["stage-a"]);
+  expect(Object.keys(jobs)).toEqual(["stage-a", "local-platform"]);
   const steps = jobs["stage-a"].steps;
   const names = steps.map((step: { name?: string }) => step.name);
   expect(names).toEqual(
@@ -33,4 +33,7 @@ test("pull-request workflow runs the M00 Stage A checks", async () => {
   expect(commands).toEqual(
     expect.arrayContaining(["pnpm format:check", "pnpm test", "pnpm build"]),
   );
+  expect(
+    jobs["local-platform"].steps.map((step: { name?: string }) => step.name),
+  ).toContain("Verify Compose topology");
 });

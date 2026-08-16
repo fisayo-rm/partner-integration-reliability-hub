@@ -19,6 +19,10 @@
     "test:watch": "vitest",
     "secret:scan": "node scripts/scan-secrets.mjs",
     "audit": "pnpm audit --audit-level high",
+    "local:up": "docker compose up --build",
+    "local:up:observability": "docker compose --profile observability up --build",
+    "local:down": "docker compose down --volumes --remove-orphans",
+    "local:verify": "node scripts/verify-local-platform.mjs",
     "verify": "pnpm format:check && pnpm lint && pnpm typecheck && pnpm architecture && pnpm test && pnpm build && pnpm secret:scan && pnpm audit"
   },
   "devDependencies": {

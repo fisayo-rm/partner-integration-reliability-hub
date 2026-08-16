@@ -1,2 +1,2 @@
-/** M00 placeholder. Fastify composition begins in M01. */
-export {};
+export * from "./app.js";
+export * from "./lambda-handler.js";

@@ -1,3 +1,5 @@
+import { createHash } from "node:crypto";
+import { transitionDelivery } from "@pirh/domain";
 import type {
   ApiClient,
   AuditEvent,
@@ -170,7 +172,20 @@ export interface EventAcceptanceWriter {
     readonly idempotencyKeyHash: string;
     readonly responseStatus: number;
     readonly outbox: OutboxRecord;
-  }): Promise<"accepted" | "duplicate" | "conflict">;
+  }): Promise<
+    | { readonly kind: "accepted"; readonly event: CanonicalEvent }
+    | { readonly kind: "duplicate"; readonly event: CanonicalEvent }
+    | { readonly kind: "conflict" }
+  >;
+}
+export interface RoutingRepository {
+  createDelivery(input: {
+    readonly context: TenantContext;
+    readonly delivery: DeliveryExecution;
+    readonly history: DeliveryHistoryEntry;
+    readonly outbox?: OutboxRecord;
+  }): Promise<"created" | "duplicate">;
+  completeRouting(context: TenantContext, eventId: EventId): Promise<void>;
 }
 export interface DeliveryConcurrencyRepository {
   replaceIfVersion(
@@ -192,6 +207,14 @@ export interface DeliveryConcurrencyRepository {
     readonly owner: string;
     readonly token: string;
     readonly expiresAt: string;
+  }): Promise<DeliveryExecution | undefined>;
+  finalizeSuccess(input: {
+    readonly context: TenantContext;
+    readonly eventId: EventId;
+    readonly delivery: DeliveryExecution;
+    readonly expectedVersion: number;
+    readonly attempt: DeliveryAttempt;
+    readonly history: DeliveryHistoryEntry;
   }): Promise<boolean>;
 }
 export interface NonceRepository {
@@ -277,7 +300,8 @@ export interface IdGenerator {
       | "sub"
       | "ptr"
       | "dst"
-      | "req",
+      | "req"
+      | "lease",
   ): string;
 }
 export interface EndpointValidator {
@@ -661,4 +685,553 @@ export interface RequestIdentity {
   readonly tenantId: TenantContext["tenantId"];
   readonly clientId: ClientId;
   readonly correlationId: CorrelationId;
+}
+
+function stableJson(value: unknown): string {
+  if (value === null || typeof value !== "object") return JSON.stringify(value);
+  if (Array.isArray(value)) return `[${value.map(stableJson).join(",")}]`;
+  const record = value as Record<string, unknown>;
+  return `{${Object.keys(record)
+    .sort()
+    .map((key) => `${JSON.stringify(key)}:${stableJson(record[key])}`)
+    .join(",")}}`;
+}
+
+export function canonicalJsonHash(value: JsonObject): string {
+  return createHash("sha256").update(stableJson(value)).digest("hex");
+}
+
+export function deterministicIdentifier(
+  prefix: "dlv" | "obx",
+  value: string,
+): string {
+  const alphabet = "0123456789ABCDEFGHJKMNPQRSTVWXYZ";
+  const bytes = createHash("sha256").update(value).digest();
+  let bits = 0;
+  let buffer = 0;
+  let encoded = "";
+  for (const byte of bytes) {
+    buffer = (buffer << 8) | byte;
+    bits += 8;
+    while (bits >= 5 && encoded.length < 26) {
+      bits -= 5;
+      encoded += alphabet[(buffer >> bits) & 31];
+    }
+    if (encoded.length === 26) break;
+  }
+  return `${prefix}_${encoded.padEnd(26, "0")}`;
+}
+
+export interface EventIngestionDependencies {
+  readonly writer: EventAcceptanceWriter;
+  readonly ids: IdGenerator;
+  readonly clock: Clock;
+  readonly supportedEventTypes: ReadonlySet<string>;
+  readonly eventRetentionDays: number;
+}
+
+export class EventIngestionService {
+  public constructor(
+    private readonly dependencies: EventIngestionDependencies,
+  ) {}
+  public async accept(
+    context: TenantContext,
+    input: {
+      readonly eventType: string;
+      readonly occurredAt: string;
+      readonly subject: CanonicalEvent["subject"];
+      readonly data: JsonObject;
+      readonly metadata: JsonObject;
+      readonly idempotencyKey: string;
+    },
+  ) {
+    if (!this.dependencies.supportedEventTypes.has(input.eventType))
+      throw new Error("UNSUPPORTED_EVENT_TYPE");
+    const now = this.dependencies.clock.now();
+    const at = now.toISOString() as CanonicalEvent["acceptedAt"];
+    const eventId = this.dependencies.ids.next("evt") as EventId;
+    const correlationId = this.dependencies.ids.next("cor") as CorrelationId;
+    const canonical: JsonObject = {
+      eventType: input.eventType,
+      occurredAt: input.occurredAt,
+      subject: input.subject as never,
+      data: input.data,
+      metadata: input.metadata,
+    };
+    const event: CanonicalEvent = {
+      eventId,
+      tenantId: context.tenantId,
+      producerClientId: context.actorId as ClientId,
+      correlationId,
+      eventType: input.eventType,
+      occurredAt: input.occurredAt as CanonicalEvent["occurredAt"],
+      acceptedAt: at,
+      subject: input.subject,
+      data: input.data,
+      metadata: input.metadata,
+      payloadHash: canonicalJsonHash(canonical),
+      status: "accepted",
+      outcome: {
+        routingComplete: false,
+        totalDeliveries: 0,
+        terminalDeliveries: 0,
+        successfulDeliveries: 0,
+        failedTerminalDeliveries: 0,
+        deadLetteredDeliveries: 0,
+      },
+      version: 1,
+      expiresAt: new Date(
+        now.getTime() + this.dependencies.eventRetentionDays * 86_400_000,
+      ).toISOString() as CanonicalEvent["expiresAt"],
+    };
+    const outbox: OutboxRecord = {
+      outboxId: this.dependencies.ids.next("obx") as OutboxRecord["outboxId"],
+      kind: "ROUTE_EVENT",
+      tenantId: context.tenantId,
+      aggregateType: "EVENT",
+      aggregateId: eventId,
+      target: "ROUTING_QUEUE",
+      payload: { eventId, correlationId, cause: "INITIAL" },
+      createdAt: at,
+      attempts: 0,
+      schemaVersion: 1,
+    };
+    const result = await this.dependencies.writer.accept({
+      context: { ...context, correlationId },
+      event,
+      requestBodyHash: canonicalJsonHash(canonical),
+      idempotencyKeyHash: createHash("sha256")
+        .update(input.idempotencyKey)
+        .digest("hex"),
+      responseStatus: 202,
+      outbox,
+    });
+    if (result.kind === "conflict") throw new Error("IDEMPOTENCY_KEY_REUSED");
+    return {
+      event: result.event,
+      previouslyAccepted: result.kind === "duplicate",
+    };
+  }
+}
+
+export interface RoutingDependencies {
+  readonly core: CoreRepository;
+  readonly repository: RoutingRepository;
+  readonly execute: ControlPlaneDependencies["execute"];
+  readonly ids: IdGenerator;
+  readonly clock: Clock;
+  readonly retentionDays: number;
+}
+
+function routingContext(
+  tenantId: TenantContext["tenantId"],
+  correlationId: CorrelationId,
+): TenantContext {
+  return {
+    tenantId,
+    actorType: "system",
+    actorId: "router-worker",
+    requestId: "router-worker",
+    correlationId,
+  };
+}
+
+export class RoutingService {
+  public constructor(private readonly dependencies: RoutingDependencies) {}
+  public async route(input: {
+    readonly tenantId: TenantContext["tenantId"];
+    readonly eventId: EventId;
+    readonly correlationId: CorrelationId;
+  }): Promise<void> {
+    const context = routingContext(input.tenantId, input.correlationId);
+    const event = await this.dependencies.core.getEvent(context, input.eventId);
+    if (event === undefined) return;
+    const subscriptions = (
+      await this.dependencies.core.listSubscriptions(context, event.eventType)
+    ).filter((subscription) => subscription.enabled);
+    let created = 0;
+    for (const subscription of subscriptions) {
+      const destination = await this.dependencies.core.getDestination(
+        context,
+        subscription.destinationId,
+      );
+      if (destination === undefined || !destination.enabled) continue;
+      const partner = await this.dependencies.core.getPartner(
+        context,
+        destination.partnerId,
+      );
+      if (partner === undefined || !partner.enabled) continue;
+      const transformation =
+        await this.dependencies.core.getTransformationVersion(
+          context,
+          destination.transformationId,
+          destination.activeTransformationVersion,
+        );
+      if (transformation === undefined) continue;
+      const deliveryId = deterministicIdentifier(
+        "dlv",
+        `${event.tenantId}\n${event.eventId}\n${destination.destinationId}\nORIGINAL`,
+      ) as DeliveryExecution["deliveryId"];
+      const at = this.dependencies.clock
+        .now()
+        .toISOString() as DeliveryExecution["createdAt"];
+      const url = new URL(destination.path, destination.baseUrl).toString();
+      const snapshot = {
+        destinationVersion: destination.version,
+        url,
+        method: destination.method,
+        timeoutMs: destination.timeoutMs,
+        retryPolicy: destination.retryPolicy,
+        rateLimitPolicyId: `${destination.destinationId}:v${destination.version}`,
+        circuitBreakerPolicyId: `${destination.destinationId}:v${destination.version}`,
+        authType: destination.authType,
+        authConfiguration: destination.authConfiguration,
+        secretReferenceNames: destination.secretReferences.map(
+          (reference) => reference.name,
+        ),
+        transformationId: transformation.transformationId,
+        transformationVersion: transformation.version,
+        redactionPaths: destination.sensitiveResponseJsonPaths,
+        ...(typeof destination.authConfiguration.idempotencyHeader === "string"
+          ? {
+              idempotencyHeader:
+                destination.authConfiguration.idempotencyHeader,
+            }
+          : {}),
+      } as DeliveryExecution["configSnapshot"];
+      try {
+        const transformed = this.dependencies.execute(
+          transformation.definition,
+          event as unknown as JsonObject,
+        );
+        const delivery: DeliveryExecution = {
+          deliveryId,
+          eventId: event.eventId,
+          correlationId: event.correlationId,
+          tenantId: event.tenantId,
+          partnerId: destination.partnerId,
+          destinationId: destination.destinationId,
+          executionType: "ORIGINAL",
+          state: "scheduled",
+          attemptCount: 0,
+          maxAttempts: destination.retryPolicy.maxAttempts,
+          nextEligibleAt: at,
+          configSnapshot: snapshot,
+          transformedPayload: transformed.output,
+          transformedPayloadHash: transformed.hash,
+          partnerIdempotencyKey: createHash("sha256")
+            .update(
+              `${event.tenantId}\n${event.eventId}\n${destination.destinationId}\n${deliveryId}`,
+            )
+            .digest("base64url"),
+          createdAt: at,
+          updatedAt: at,
+          version: 1,
+          expiresAt: new Date(
+            this.dependencies.clock.now().getTime() +
+              this.dependencies.retentionDays * 86_400_000,
+          ).toISOString() as DeliveryExecution["expiresAt"],
+        };
+        const history: DeliveryHistoryEntry = {
+          historyId: this.dependencies.ids.next("req"),
+          deliveryId,
+          tenantId: event.tenantId,
+          correlationId: event.correlationId,
+          type: "created",
+          occurredAt: at,
+          summary: "Delivery created and scheduled.",
+          metadata: {},
+        };
+        const outbox: OutboxRecord = {
+          outboxId: deterministicIdentifier(
+            "obx",
+            `DELIVER\n${deliveryId}`,
+          ) as OutboxRecord["outboxId"],
+          kind: "DELIVER",
+          tenantId: event.tenantId,
+          aggregateType: "DELIVERY",
+          aggregateId: deliveryId,
+          target: "DELIVERY_QUEUE",
+          payload: {
+            eventId: event.eventId,
+            deliveryId,
+            correlationId: event.correlationId,
+            cause: "INITIAL",
+          },
+          createdAt: at,
+          attempts: 0,
+          schemaVersion: 1,
+        };
+        const result = await this.dependencies.repository.createDelivery({
+          context,
+          delivery,
+          history,
+          outbox,
+        });
+        if (result === "created") created += 1;
+      } catch {
+        const delivery: DeliveryExecution = {
+          deliveryId,
+          eventId: event.eventId,
+          correlationId: event.correlationId,
+          tenantId: event.tenantId,
+          partnerId: destination.partnerId,
+          destinationId: destination.destinationId,
+          executionType: "ORIGINAL",
+          state: "failed_terminal",
+          blockedReason: "TRANSFORMATION_ERROR",
+          attemptCount: 0,
+          maxAttempts: destination.retryPolicy.maxAttempts,
+          configSnapshot: snapshot,
+          transformedPayload: {},
+          transformedPayloadHash: createHash("sha256")
+            .update("{}")
+            .digest("hex"),
+          partnerIdempotencyKey: createHash("sha256")
+            .update(
+              `${event.tenantId}\n${event.eventId}\n${destination.destinationId}\n${deliveryId}`,
+            )
+            .digest("base64url"),
+          createdAt: at,
+          updatedAt: at,
+          terminalAt: at,
+          version: 1,
+          expiresAt: new Date(
+            this.dependencies.clock.now().getTime() +
+              this.dependencies.retentionDays * 86_400_000,
+          ).toISOString() as DeliveryExecution["expiresAt"],
+        };
+        await this.dependencies.repository.createDelivery({
+          context,
+          delivery,
+          history: {
+            historyId: this.dependencies.ids.next("req"),
+            deliveryId,
+            tenantId: event.tenantId,
+            correlationId: event.correlationId,
+            type: "state_transition",
+            occurredAt: at,
+            summary: "Transformation failed.",
+            metadata: { failureCategory: "TRANSFORMATION_ERROR" },
+          },
+        });
+      }
+    }
+    void created;
+    await this.dependencies.repository.completeRouting(context, event.eventId);
+  }
+}
+
+export interface OAuthTokenProvider {
+  get(input: {
+    readonly destinationId: string;
+    readonly tokenUrl: string;
+    readonly clientId: string;
+    readonly clientSecret: string;
+    readonly scopes: readonly string[];
+    readonly authenticationStyle: "basic" | "body";
+    readonly correlationId: CorrelationId;
+  }): Promise<string>;
+}
+export interface DeliveryDependencies {
+  readonly core: CoreRepository;
+  readonly repository: DeliveryConcurrencyRepository;
+  readonly secrets: SecretStore;
+  readonly http: PartnerHttpClient;
+  readonly oauth: OAuthTokenProvider;
+  readonly ids: IdGenerator;
+  readonly clock: Clock;
+}
+
+function redactedHeaders(headers: Readonly<Record<string, string>>) {
+  const result: Record<string, string> = {};
+  for (const [name, value] of Object.entries(headers))
+    result[name] = /authorization|api-key/i.test(name) ? "[REDACTED]" : value;
+  return result;
+}
+function responseEvidence(
+  headers: Readonly<Record<string, string>>,
+  body: string,
+  redactionPaths: readonly string[],
+) {
+  const safe: Record<string, string> = {};
+  for (const [name, value] of Object.entries(headers))
+    if (
+      [
+        "content-type",
+        "content-length",
+        "retry-after",
+        "x-request-id",
+      ].includes(name.toLowerCase())
+    )
+      safe[name.toLowerCase()] = value;
+  let excerpt = body.slice(0, 16 * 1024);
+  try {
+    const parsed = JSON.parse(excerpt) as Record<string, unknown>;
+    for (const path of redactionPaths) {
+      const parts = path.replace(/^\$\./, "").split(".");
+      let target: Record<string, unknown> | undefined = parsed;
+      for (const part of parts.slice(0, -1))
+        target =
+          target !== undefined &&
+          typeof target[part] === "object" &&
+          target[part] !== null
+            ? (target[part] as Record<string, unknown>)
+            : undefined;
+      const final = parts.at(-1);
+      if (target !== undefined && final !== undefined && final in target)
+        target[final] = "[REDACTED]";
+    }
+    excerpt = JSON.stringify(parsed);
+  } catch {
+    // Opaque bodies are retained only as a bounded excerpt.
+  }
+  return {
+    headers: safe,
+    bodyExcerpt: excerpt,
+    bodyHash: createHash("sha256").update(body).digest("hex"),
+  };
+}
+
+export class DeliveryService {
+  public constructor(private readonly dependencies: DeliveryDependencies) {}
+  public async deliver(input: {
+    readonly tenantId: TenantContext["tenantId"];
+    readonly eventId: EventId;
+    readonly deliveryId: DeliveryExecution["deliveryId"];
+    readonly correlationId: CorrelationId;
+    readonly owner: string;
+  }): Promise<void> {
+    const context = routingContext(input.tenantId, input.correlationId);
+    const initial = await this.dependencies.core.getDelivery(
+      context,
+      input.deliveryId,
+    );
+    if (
+      initial === undefined ||
+      ["succeeded", "failed_terminal", "dead_lettered", "cancelled"].includes(
+        initial.state,
+      )
+    )
+      return;
+    const now = this.dependencies.clock.now();
+    const token = this.dependencies.ids.next("lease");
+    const leased = await this.dependencies.repository.acquireLease({
+      context,
+      eventId: input.eventId,
+      deliveryId: input.deliveryId,
+      expectedVersion: initial.version,
+      owner: input.owner,
+      token,
+      expiresAt: new Date(
+        now.getTime() + initial.configSnapshot.timeoutMs + 5_000,
+      ).toISOString(),
+    });
+    if (leased === undefined || leased.leaseToken !== token) return;
+    const secretName = leased.configSnapshot.secretReferenceNames[0];
+    if (secretName === undefined) throw new Error("SECRET_NOT_FOUND");
+    const secret = await this.dependencies.secrets.resolve(context, {
+      name: secretName,
+    });
+    const headers: Record<string, string> = {
+      "content-type": "application/json",
+    };
+    if (leased.configSnapshot.authType === "api_key") {
+      const headerName = leased.configSnapshot.authConfiguration.headerName;
+      if (typeof headerName !== "string")
+        throw new Error("INVALID_AUTH_CONFIGURATION");
+      headers[headerName] = secret.value;
+      if (leased.configSnapshot.idempotencyHeader !== undefined)
+        headers[leased.configSnapshot.idempotencyHeader] =
+          leased.partnerIdempotencyKey;
+    } else {
+      const configuration = leased.configSnapshot.authConfiguration;
+      if (
+        typeof configuration.tokenUrl !== "string" ||
+        typeof configuration.clientId !== "string" ||
+        (configuration.authenticationStyle !== "basic" &&
+          configuration.authenticationStyle !== "body") ||
+        !Array.isArray(configuration.scopes)
+      )
+        throw new Error("INVALID_AUTH_CONFIGURATION");
+      headers.authorization = `Bearer ${await this.dependencies.oauth.get({
+        destinationId: leased.destinationId,
+        tokenUrl: configuration.tokenUrl,
+        clientId: configuration.clientId,
+        clientSecret: secret.value,
+        scopes: configuration.scopes.filter(
+          (scope): scope is string => typeof scope === "string",
+        ),
+        authenticationStyle: configuration.authenticationStyle,
+        correlationId: leased.correlationId,
+      })}`;
+      headers["x-delivery-key"] = leased.partnerIdempotencyKey;
+    }
+    const started = this.dependencies.clock.now();
+    const body = JSON.stringify(leased.transformedPayload);
+    const response = await this.dependencies.http.send({
+      url: leased.configSnapshot.url,
+      method: leased.configSnapshot.method,
+      headers,
+      body,
+      timeoutMs: leased.configSnapshot.timeoutMs,
+      correlationId: leased.correlationId,
+    });
+    if (response.status < 200 || response.status >= 300)
+      throw new Error(`PARTNER_HTTP_${response.status}`);
+    const completed = this.dependencies.clock.now();
+    const evidence = responseEvidence(
+      response.headers,
+      response.body,
+      leased.configSnapshot.redactionPaths,
+    );
+    const succeeded = {
+      ...transitionDelivery(leased, {
+        to: "succeeded",
+        at: completed.toISOString() as never,
+        expectedVersion: leased.version,
+        leaseToken: leased.leaseToken,
+      }),
+      attemptCount: leased.attemptCount + 1,
+    };
+    const attempt: DeliveryAttempt = {
+      attemptId: this.dependencies.ids.next(
+        "att",
+      ) as DeliveryAttempt["attemptId"],
+      attemptNumber: succeeded.attemptCount,
+      deliveryId: leased.deliveryId,
+      correlationId: leased.correlationId,
+      startedAt: started.toISOString() as never,
+      completedAt: completed.toISOString() as never,
+      durationMs: completed.getTime() - started.getTime(),
+      requestMethod: leased.configSnapshot.method,
+      requestUrl: leased.configSnapshot.url,
+      requestHeadersRedacted: redactedHeaders(headers),
+      requestBodyHash: createHash("sha256").update(body).digest("hex"),
+      responseStatus: response.status,
+      responseHeadersRedacted: evidence.headers,
+      responseBodyExcerptRedacted: evidence.bodyExcerpt,
+      responseBodyHash: evidence.bodyHash,
+      outcome: "succeeded",
+    };
+    const history: DeliveryHistoryEntry = {
+      historyId: this.dependencies.ids.next("req"),
+      deliveryId: leased.deliveryId,
+      tenantId: leased.tenantId,
+      correlationId: leased.correlationId,
+      type: "state_transition",
+      occurredAt: completed.toISOString() as never,
+      summary: "Delivery succeeded.",
+      metadata: { state: "succeeded" },
+    };
+    const finalized = await this.dependencies.repository.finalizeSuccess({
+      context,
+      eventId: leased.eventId,
+      delivery: succeeded,
+      expectedVersion: leased.version,
+      attempt,
+      history,
+    });
+    if (!finalized) throw new Error("DELIVERY_FINALIZATION_CONFLICT");
+  }
 }

@@ -147,6 +147,7 @@ test("event/idempotency/outbox persistence is atomic and duplicate-safe", async 
     data: {},
     metadata: {},
     payloadHash: "hash",
+    status: "accepted",
     outcome: {
       routingComplete: false,
       totalDeliveries: 0,
@@ -155,6 +156,7 @@ test("event/idempotency/outbox persistence is atomic and duplicate-safe", async 
       failedTerminalDeliveries: 0,
       deadLetteredDeliveries: 0,
     },
+    version: 1,
     expiresAt: new Date(Date.now() + 86_400_000).toISOString() as never,
   };
   const outbox: OutboxRecord = {
@@ -165,7 +167,11 @@ test("event/idempotency/outbox persistence is atomic and duplicate-safe", async 
     aggregateType: "EVENT",
     aggregateId: event.eventId,
     target: "ROUTING_QUEUE",
-    payload: { eventId: event.eventId },
+    payload: {
+      eventId: event.eventId,
+      correlationId: event.correlationId,
+      cause: "INITIAL",
+    },
     createdAt: now,
     attempts: 0,
     schemaVersion: 1,
@@ -178,11 +184,11 @@ test("event/idempotency/outbox persistence is atomic and duplicate-safe", async 
     responseStatus: 202,
     outbox,
   };
-  expect(await persistence.accept(input)).toBe("accepted");
-  expect(await persistence.accept(input)).toBe("duplicate");
-  expect(await persistence.accept({ ...input, requestBodyHash: "other" })).toBe(
-    "conflict",
-  );
+  expect((await persistence.accept(input)).kind).toBe("accepted");
+  expect((await persistence.accept(input)).kind).toBe("duplicate");
+  expect(
+    (await persistence.accept({ ...input, requestBodyHash: "other" })).kind,
+  ).toBe("conflict");
   await expect(
     persistence.getEvent(context(tenantA), event.eventId),
   ).resolves.toMatchObject({ eventId: event.eventId });

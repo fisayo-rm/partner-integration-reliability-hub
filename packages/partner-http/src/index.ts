@@ -181,7 +181,10 @@ export class SafePartnerHttpClient implements PartnerHttpClient {
       const req = transport.request(
         {
           protocol: url.protocol,
-          hostname: url.hostname,
+          // Connect to the address just validated instead of resolving the hostname again.
+          // This prevents DNS rebinding between validation and the outbound socket.
+          hostname: address,
+          servername: url.hostname,
           port: url.port || undefined,
           path: `${url.pathname}${url.search}`,
           method: request.method,
@@ -189,12 +192,11 @@ export class SafePartnerHttpClient implements PartnerHttpClient {
           timeout: request.timeoutMs,
           headers: {
             ...request.headers,
+            host: url.host,
             "accept-encoding": "identity",
             "user-agent": "pirh/0.1",
             "x-correlation-id": request.correlationId,
           },
-          lookup: (_host, _options, callback) =>
-            callback(null, address, net.isIP(address)),
         },
         (response) => {
           if (

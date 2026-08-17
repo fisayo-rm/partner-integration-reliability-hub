@@ -90,7 +90,29 @@ importers:
 
   apps/console: {}
 
-  apps/delivery-worker: {}
+  apps/delivery-worker:
+    dependencies:
+      "@aws-sdk/client-dynamodb":
+        specifier: 3.1111.0
+        version: 3.1111.0
+      "@aws-sdk/lib-dynamodb":
+        specifier: 3.1111.0
+        version: 3.1111.0(@aws-sdk/client-dynamodb@3.1111.0)
+      "@pirh/application":
+        specifier: workspace:*
+        version: link:../../packages/application
+      "@pirh/partner-http":
+        specifier: workspace:*
+        version: link:../../packages/partner-http
+      "@pirh/persistence":
+        specifier: workspace:*
+        version: link:../../packages/persistence
+      "@pirh/queue":
+        specifier: workspace:*
+        version: link:../../packages/queue
+      "@pirh/secrets":
+        specifier: workspace:*
+        version: link:../../packages/secrets
 
   apps/mock-partner-alpha:
     dependencies:
@@ -110,11 +132,62 @@ importers:
         specifier: 5.8.5
         version: 5.8.5
 
-  apps/outbox-reconciler: {}
+  apps/outbox-reconciler:
+    dependencies:
+      "@aws-sdk/client-dynamodb":
+        specifier: 3.1111.0
+        version: 3.1111.0
+      "@aws-sdk/lib-dynamodb":
+        specifier: 3.1111.0
+        version: 3.1111.0(@aws-sdk/client-dynamodb@3.1111.0)
+      "@pirh/contracts":
+        specifier: workspace:*
+        version: link:../../packages/contracts
+      "@pirh/persistence":
+        specifier: workspace:*
+        version: link:../../packages/persistence
+      "@pirh/queue":
+        specifier: workspace:*
+        version: link:../../packages/queue
 
-  apps/outbox-worker: {}
+  apps/outbox-worker:
+    dependencies:
+      "@aws-sdk/client-dynamodb":
+        specifier: 3.1111.0
+        version: 3.1111.0
+      "@aws-sdk/lib-dynamodb":
+        specifier: 3.1111.0
+        version: 3.1111.0(@aws-sdk/client-dynamodb@3.1111.0)
+      "@pirh/contracts":
+        specifier: workspace:*
+        version: link:../../packages/contracts
+      "@pirh/persistence":
+        specifier: workspace:*
+        version: link:../../packages/persistence
+      "@pirh/queue":
+        specifier: workspace:*
+        version: link:../../packages/queue
 
-  apps/router-worker: {}
+  apps/router-worker:
+    dependencies:
+      "@aws-sdk/client-dynamodb":
+        specifier: 3.1111.0
+        version: 3.1111.0
+      "@aws-sdk/lib-dynamodb":
+        specifier: 3.1111.0
+        version: 3.1111.0(@aws-sdk/client-dynamodb@3.1111.0)
+      "@pirh/application":
+        specifier: workspace:*
+        version: link:../../packages/application
+      "@pirh/persistence":
+        specifier: workspace:*
+        version: link:../../packages/persistence
+      "@pirh/queue":
+        specifier: workspace:*
+        version: link:../../packages/queue
+      "@pirh/transformation":
+        specifier: workspace:*
+        version: link:../../packages/transformation
 
   packages/application:
     dependencies:
@@ -172,7 +245,20 @@ importers:
         specifier: workspace:*
         version: link:../domain
 
-  packages/queue: {}
+  packages/queue:
+    dependencies:
+      "@aws-sdk/client-sqs":
+        specifier: 3.1111.0
+        version: 3.1111.0
+      "@pirh/application":
+        specifier: workspace:*
+        version: link:../application
+      "@pirh/contracts":
+        specifier: workspace:*
+        version: link:../contracts
+      "@pirh/domain":
+        specifier: workspace:*
+        version: link:../domain
 
   packages/secrets:
     dependencies:
@@ -206,6 +292,13 @@ packages:
     resolution:
       {
         integrity: sha512-rji6S5ZJfBp3ahC7pcEilaBKDrnLNZGerIzXCEOhur9gkgMhTiJjpoQSLKgR1Lnehetew1isiciL9xVoNvt9uw==,
+      }
+    engines: { node: ">=20.0.0" }
+
+  "@aws-sdk/client-sqs@3.1111.0":
+    resolution:
+      {
+        integrity: sha512-xeyZhY/yL5d5mcLqtHEsdKkTdNuSGslcmIOgx402dMFji2lzRigzX8caNTdmtpTHwa47DGBoTHB3v9UgbmSnvg==,
       }
     engines: { node: ">=20.0.0" }
 
@@ -299,6 +392,13 @@ packages:
     resolution:
       {
         integrity: sha512-cXW7QNIOhUSfccZmwJEjn9EdCAjzdOtt/+MtO5HWgxIZdhzyC1kNuQKIgGEDkgabxiXymWw0/VFWdqxqeLbgMA==,
+      }
+    engines: { node: ">=20.0.0" }
+
+  "@aws-sdk/middleware-sdk-sqs@3.972.41":
+    resolution:
+      {
+        integrity: sha512-07AbG/6LlaoC3YJ97vPgWVYFGWg3W3Bdr1ow3xjwti5u9/PjVD8+wB+qu2jDZnIvE6F7Y4ONWYCDQTPxiepdnA==,
       }
     engines: { node: ">=20.0.0" }
 
@@ -2504,6 +2604,18 @@ snapshots:
       "@smithy/types": 4.17.2
       tslib: 2.8.1
 
+  "@aws-sdk/client-sqs@3.1111.0":
+    dependencies:
+      "@aws-sdk/core": 3.977.8
+      "@aws-sdk/credential-provider-node": 3.972.80
+      "@aws-sdk/middleware-sdk-sqs": 3.972.41
+      "@aws-sdk/types": 3.974.4
+      "@smithy/core": 3.33.2
+      "@smithy/fetch-http-handler": 5.7.2
+      "@smithy/node-http-handler": 4.11.2
+      "@smithy/types": 4.17.2
+      tslib: 2.8.1
+
   "@aws-sdk/core@3.977.8":
     dependencies:
       "@aws-sdk/types": 3.974.4
@@ -2623,6 +2735,13 @@ snapshots:
   "@aws-sdk/middleware-endpoint-discovery@3.972.29":
     dependencies:
       "@aws-sdk/endpoint-cache": 3.972.11
+      "@aws-sdk/types": 3.974.4
+      "@smithy/core": 3.33.2
+      "@smithy/types": 4.17.2
+      tslib: 2.8.1
+
+  "@aws-sdk/middleware-sdk-sqs@3.972.41":
+    dependencies:
       "@aws-sdk/types": 3.974.4
       "@smithy/core": 3.33.2
       "@smithy/types": 4.17.2

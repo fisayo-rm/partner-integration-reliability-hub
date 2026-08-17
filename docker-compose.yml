@@ -153,21 +153,63 @@ services:
       retries: 20
 
   outbox-worker:
-    <<: *placeholder
-    depends_on: { bootstrap: { condition: service_completed_successfully } }
-    environment: { PORT: "3001", SERVICE_NAME: outbox-worker }
+    image: pirh-m01-node:local
+    build: *node-build
+    command: ["node", "apps/outbox-worker/dist/index.js"]
+    restart: on-failure:3
+    depends_on: { seed: { condition: service_completed_successfully } }
+    environment:
+      AWS_REGION: us-east-1
+      DYNAMODB_ENDPOINT: http://dynamodb-local:8000
+      ELASTICMQ_ENDPOINT: http://elasticmq:9324
+      CORE_TABLE_NAME: pirh-core-local
+      AUDIT_TABLE_NAME: pirh-audit-local
+      ROUTING_QUEUE_NAME: pirh-routing-local
+      DELIVERY_QUEUE_NAME: pirh-delivery-local
   router-worker:
-    <<: *placeholder
-    depends_on: { bootstrap: { condition: service_completed_successfully } }
-    environment: { PORT: "3002", SERVICE_NAME: router-worker }
+    image: pirh-m01-node:local
+    build: *node-build
+    command: ["node", "apps/router-worker/dist/index.js"]
+    restart: on-failure:3
+    depends_on: { seed: { condition: service_completed_successfully } }
+    environment:
+      AWS_REGION: us-east-1
+      DYNAMODB_ENDPOINT: http://dynamodb-local:8000
+      ELASTICMQ_ENDPOINT: http://elasticmq:9324
+      CORE_TABLE_NAME: pirh-core-local
+      AUDIT_TABLE_NAME: pirh-audit-local
+      ROUTING_QUEUE_NAME: pirh-routing-local
   delivery-worker:
-    <<: *placeholder
-    depends_on: { bootstrap: { condition: service_completed_successfully } }
-    environment: { PORT: "3003", SERVICE_NAME: delivery-worker }
+    image: pirh-m01-node:local
+    build: *node-build
+    command: ["node", "apps/delivery-worker/dist/index.js"]
+    restart: on-failure:3
+    depends_on:
+      seed: { condition: service_completed_successfully }
+      mock-partner-alpha: { condition: service_started }
+      mock-partner-beta: { condition: service_started }
+    environment:
+      AWS_REGION: us-east-1
+      DYNAMODB_ENDPOINT: http://dynamodb-local:8000
+      ELASTICMQ_ENDPOINT: http://elasticmq:9324
+      CORE_TABLE_NAME: pirh-core-local
+      AUDIT_TABLE_NAME: pirh-audit-local
+      DELIVERY_QUEUE_NAME: pirh-delivery-local
+      LOCAL_SECRET_MASTER_KEY_B64: ${LOCAL_SECRET_MASTER_KEY_B64:-}
   outbox-reconciler:
-    <<: *placeholder
-    depends_on: { bootstrap: { condition: service_completed_successfully } }
-    environment: { PORT: "3004", SERVICE_NAME: outbox-reconciler }
+    image: pirh-m01-node:local
+    build: *node-build
+    command: ["node", "apps/outbox-reconciler/dist/index.js"]
+    restart: on-failure:3
+    depends_on: { seed: { condition: service_completed_successfully } }
+    environment:
+      AWS_REGION: us-east-1
+      DYNAMODB_ENDPOINT: http://dynamodb-local:8000
+      ELASTICMQ_ENDPOINT: http://elasticmq:9324
+      CORE_TABLE_NAME: pirh-core-local
+      AUDIT_TABLE_NAME: pirh-audit-local
+      ROUTING_QUEUE_NAME: pirh-routing-local
+      DELIVERY_QUEUE_NAME: pirh-delivery-local
   mock-partner-alpha:
     image: pirh-m01-node:local
     build: *node-build

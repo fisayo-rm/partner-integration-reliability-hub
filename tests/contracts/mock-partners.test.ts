@@ -56,7 +56,7 @@ test("mock Alpha authenticates and implements native idempotency without capturi
     await app.close();
   }
 });
-test("mock Beta issues OAuth credentials and intentionally does not deduplicate delivery keys", async () => {
+test("mock Beta accepts standard form-encoded OAuth and intentionally does not deduplicate delivery keys", async () => {
   const app = buildMockPartnerBeta({
     clientId: "client",
     clientSecret: "secret",
@@ -67,10 +67,10 @@ test("mock Beta issues OAuth credentials and intentionally does not deduplicate 
       await app.inject({
         method: "POST",
         url: "/oauth/token",
-        payload: {
-          grant_type: "client_credentials",
-          client_id: "client",
-          client_secret: "secret",
+        payload: "grant_type=client_credentials",
+        headers: {
+          "content-type": "application/x-www-form-urlencoded",
+          authorization: `Basic ${Buffer.from("client:secret").toString("base64")}`,
         },
       })
     ).json().access_token as string;

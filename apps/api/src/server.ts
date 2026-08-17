@@ -1,8 +1,12 @@
 import { buildApi, type HealthProbe } from "./app.js";
 import { DynamoDBClient } from "@aws-sdk/client-dynamodb";
 import { DynamoDBDocumentClient } from "@aws-sdk/lib-dynamodb";
-import { ConsoleAuthenticator, OidcAccessTokenVerifier } from "@pirh/auth";
-import { ControlPlaneService } from "@pirh/application";
+import {
+  ConsoleAuthenticator,
+  OidcAccessTokenVerifier,
+  ProducerAuthenticator,
+} from "@pirh/auth";
+import { ControlPlaneService, EventIngestionService } from "@pirh/application";
 import { DynamoPersistence } from "@pirh/persistence";
 import { LocalDynamoDbSecretStore } from "@pirh/secrets";
 import { SafePartnerHttpClient } from "@pirh/partner-http";
@@ -114,5 +118,26 @@ const app = await buildApi({
       process.env.LOCAL_CURSOR_SECRET ??
       "local-cursor-secret-not-for-production",
   },
+  eventIngestion: {
+    service: new EventIngestionService({
+      writer: persistence,
+      ids: { next: (prefix) => id(prefix) },
+      clock: { now: () => new Date() },
+      supportedEventTypes: new Set(
+        (process.env.SUPPORTED_EVENT_TYPES ?? "shipment.status_changed")
+          .split(",")
+          .map((value) => value.trim())
+          .filter(Boolean),
+      ),
+      eventRetentionDays: Number(process.env.EVENT_RETENTION_DAYS ?? 30),
+    }),
+    repository: persistence,
+    producerAuthenticator: new ProducerAuthenticator(
+      persistence,
+      secrets,
+      persistence,
+    ),
+  },
+  requestId: () => id("req"),
 });
 await app.listen({ host, port });

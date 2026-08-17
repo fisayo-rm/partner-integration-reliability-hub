@@ -34,8 +34,10 @@ import type {
   IdentityRepository,
   NonceRepository,
   OutboxRepository,
+  RoutingRepository,
   TenantRepository,
 } from "@pirh/application";
+import { deriveEventStatus, isTerminalDeliveryState } from "@pirh/domain";
 import { key, stableShard } from "./keys.js";
 
 export { key, stableShard } from "./keys.js";
@@ -46,7 +48,8 @@ export interface DynamoPersistenceConfig {
   readonly auditTableName: string;
   readonly outboxShardCount: number;
 }
-export function epochSeconds(value: Date | string): number {
+export function epochSeconds(value: Date | string | number): number {
+  if (typeof value === "number") return value;
   return Math.floor(
     (typeof value === "string" ? new Date(value) : value).getTime() / 1_000,
   );
@@ -75,6 +78,40 @@ function isConditionalFailure(error: unknown): boolean {
       error.name === "TransactionCanceledException")
   );
 }
+function deliveryIndexItem(
+  delivery: DeliveryExecution,
+  category: string,
+): Item {
+  return itemWithKeys(
+    {
+      deliveryId: delivery.deliveryId,
+      eventId: delivery.eventId,
+      correlationId: delivery.correlationId,
+      destinationId: delivery.destinationId,
+      partnerId: delivery.partnerId,
+      state: delivery.state,
+      updatedAt: delivery.updatedAt,
+      expiresAt: epochSeconds(delivery.expiresAt),
+    },
+    key.deliveryIndex(
+      delivery.tenantId,
+      category,
+      delivery.updatedAt,
+      delivery.deliveryId,
+    ),
+    "DELIVERY_INDEX",
+  );
+}
+function deliveryIndexCategories(
+  delivery: DeliveryExecution,
+): readonly string[] {
+  return [
+    "ALL",
+    `STATUS#${delivery.state}`,
+    `PARTNER#${delivery.partnerId}`,
+    `DESTINATION#${delivery.destinationId}`,
+  ];
+}
 
 export class DynamoPersistence
   implements
@@ -87,6 +124,7 @@ export class DynamoPersistence
     NonceRepository,
     EventAcceptanceWriter,
     DeliveryConcurrencyRepository,
+    RoutingRepository,
     ControlPlaneRepository
 {
   public constructor(
@@ -676,28 +714,50 @@ export class DynamoPersistence
   }
   public async accept(
     input: Parameters<EventAcceptanceWriter["accept"]>[0],
-  ): Promise<"accepted" | "duplicate" | "conflict"> {
+  ): Promise<Awaited<ReturnType<EventAcceptanceWriter["accept"]>>> {
     const guardKey = key.idempotency(
       input.context.tenantId,
       input.event.producerClientId,
       input.idempotencyKeyHash,
     );
-    const existing = await this.getCore<{ readonly requestBodyHash: string }>(
-      guardKey,
-    );
-    if (existing !== undefined)
-      return existing.requestBodyHash === input.requestBodyHash
-        ? "duplicate"
-        : "conflict";
+    const existing = await this.getCore<{
+      readonly requestBodyHash: string;
+      readonly eventId: EventId;
+    }>(guardKey);
+    if (existing !== undefined) {
+      if (existing.requestBodyHash !== input.requestBodyHash)
+        return { kind: "conflict" };
+      const event = await this.getEvent(input.context, existing.eventId);
+      return event === undefined
+        ? { kind: "conflict" }
+        : { kind: "duplicate", event };
+    }
     const eventKey = key.event(input.context.tenantId, input.event.eventId);
     const correlation = key.lookup(
       input.context.tenantId,
       "CORRELATION",
       input.event.correlationId,
     );
+    const eventLookup = key.lookup(
+      input.context.tenantId,
+      "EVENT",
+      input.event.eventId,
+    );
     const eventIndex = key.eventIndex(
       input.context.tenantId,
       "ALL",
+      input.event.acceptedAt,
+      input.event.eventId,
+    );
+    const eventTypeIndex = key.eventIndex(
+      input.context.tenantId,
+      `TYPE#${input.event.eventType}`,
+      input.event.acceptedAt,
+      input.event.eventId,
+    );
+    const eventStatusIndex = key.eventIndex(
+      input.context.tenantId,
+      `STATUS#${input.event.status}`,
       input.event.acceptedAt,
       input.event.eventId,
     );
@@ -733,8 +793,51 @@ export class DynamoPersistence
                 TableName: this.config.coreTableName,
                 Item: itemWithKeys(
                   { eventId: input.event.eventId },
+                  eventLookup,
+                  "LOOKUP",
+                ),
+                ConditionExpression: "attribute_not_exists(PK)",
+              },
+            },
+            {
+              Put: {
+                TableName: this.config.coreTableName,
+                Item: itemWithKeys(
+                  { eventId: input.event.eventId },
                   correlation,
                   "LOOKUP",
+                ),
+                ConditionExpression: "attribute_not_exists(PK)",
+              },
+            },
+            {
+              Put: {
+                TableName: this.config.coreTableName,
+                Item: itemWithKeys(
+                  {
+                    eventId: input.event.eventId,
+                    eventType: input.event.eventType,
+                    acceptedAt: input.event.acceptedAt,
+                    expiresAt: epochSeconds(input.event.expiresAt),
+                  },
+                  eventTypeIndex,
+                  "EVENT_INDEX",
+                ),
+                ConditionExpression: "attribute_not_exists(PK)",
+              },
+            },
+            {
+              Put: {
+                TableName: this.config.coreTableName,
+                Item: itemWithKeys(
+                  {
+                    eventId: input.event.eventId,
+                    status: input.event.status,
+                    acceptedAt: input.event.acceptedAt,
+                    expiresAt: epochSeconds(input.event.expiresAt),
+                  },
+                  eventStatusIndex,
+                  "EVENT_INDEX",
                 ),
                 ConditionExpression: "attribute_not_exists(PK)",
               },
@@ -778,6 +881,12 @@ export class DynamoPersistence
                 Item: itemWithKeys(
                   {
                     ...input.outbox,
+                    expiresAt: epochSeconds(
+                      new Date(
+                        new Date(input.outbox.createdAt).getTime() +
+                          7 * 86_400_000,
+                      ),
+                    ),
                     GSI1PK: `OUTBOX#UNPUBLISHED#${shard}`,
                     GSI1SK: `${input.outbox.createdAt}#${input.outbox.outboxId}`,
                   },
@@ -790,16 +899,274 @@ export class DynamoPersistence
           ],
         }),
       );
-      return "accepted";
+      return { kind: "accepted", event: input.event };
     } catch (error) {
       if (!isConditionalFailure(error)) throw error;
-      const raced = await this.getCore<{ readonly requestBodyHash: string }>(
-        guardKey,
-      );
-      return raced?.requestBodyHash === input.requestBodyHash
-        ? "duplicate"
-        : "conflict";
+      const raced = await this.getCore<{
+        readonly requestBodyHash: string;
+        readonly eventId: EventId;
+      }>(guardKey);
+      if (raced?.requestBodyHash !== input.requestBodyHash)
+        return { kind: "conflict" };
+      const event = await this.getEvent(input.context, raced.eventId);
+      return event === undefined
+        ? { kind: "conflict" }
+        : { kind: "duplicate", event };
     }
+  }
+  public async createDelivery(
+    input: Parameters<RoutingRepository["createDelivery"]>[0],
+  ): Promise<"created" | "duplicate"> {
+    for (let attempt = 0; attempt < 8; attempt += 1) {
+      const existing = await this.getCore<{ readonly eventId: EventId }>(
+        key.lookup(
+          input.context.tenantId,
+          "DELIVERY",
+          input.delivery.deliveryId,
+        ),
+      );
+      if (existing !== undefined) return "duplicate";
+      const event = await this.getEvent(input.context, input.delivery.eventId);
+      if (event === undefined) throw new Error("EVENT_NOT_FOUND");
+      const terminal = isTerminalDeliveryState(input.delivery.state);
+      const outcome = {
+        ...event.outcome,
+        totalDeliveries: event.outcome.totalDeliveries + 1,
+        terminalDeliveries:
+          event.outcome.terminalDeliveries + (terminal ? 1 : 0),
+        successfulDeliveries:
+          event.outcome.successfulDeliveries +
+          (input.delivery.state === "succeeded" ? 1 : 0),
+        failedTerminalDeliveries:
+          event.outcome.failedTerminalDeliveries +
+          (input.delivery.state === "failed_terminal" ? 1 : 0),
+        deadLetteredDeliveries:
+          event.outcome.deadLetteredDeliveries +
+          (input.delivery.state === "dead_lettered" ? 1 : 0),
+      };
+      const updatedEvent: CanonicalEvent = {
+        ...event,
+        outcome,
+        status: deriveEventStatus(outcome),
+        version: event.version + 1,
+      };
+      const transaction: unknown[] = [
+        {
+          Put: {
+            TableName: this.config.coreTableName,
+            Item: itemWithKeys(
+              {
+                ...input.delivery,
+                expiresAt: epochSeconds(input.delivery.expiresAt),
+              },
+              key.delivery(
+                input.context.tenantId,
+                input.delivery.eventId,
+                input.delivery.deliveryId,
+              ),
+              "DELIVERY",
+            ),
+            ConditionExpression: "attribute_not_exists(PK)",
+          },
+        },
+        {
+          Put: {
+            TableName: this.config.coreTableName,
+            Item: itemWithKeys(
+              { eventId: input.delivery.eventId },
+              key.lookup(
+                input.context.tenantId,
+                "DELIVERY",
+                input.delivery.deliveryId,
+              ),
+              "LOOKUP",
+            ),
+            ConditionExpression: "attribute_not_exists(PK)",
+          },
+        },
+        {
+          Put: {
+            TableName: this.config.coreTableName,
+            Item: itemWithKeys(
+              input.history,
+              key.history(
+                input.context.tenantId,
+                input.delivery.eventId,
+                input.history.deliveryId,
+                input.history.occurredAt,
+                input.history.historyId,
+              ),
+              "DELIVERY_HISTORY",
+            ),
+            ConditionExpression: "attribute_not_exists(PK)",
+          },
+        },
+        ...deliveryIndexCategories(input.delivery).map((category) => ({
+          Put: {
+            TableName: this.config.coreTableName,
+            Item: deliveryIndexItem(input.delivery, category),
+            ConditionExpression: "attribute_not_exists(PK)",
+          },
+        })),
+        {
+          Put: {
+            TableName: this.config.coreTableName,
+            Item: itemWithKeys(
+              {
+                ...updatedEvent,
+                expiresAt: epochSeconds(updatedEvent.expiresAt),
+              },
+              key.event(input.context.tenantId, updatedEvent.eventId),
+              "EVENT",
+            ),
+            ConditionExpression: "#version = :version",
+            ExpressionAttributeNames: { "#version": "version" },
+            ExpressionAttributeValues: { ":version": event.version },
+          },
+        },
+      ];
+      if (event.status !== updatedEvent.status) {
+        transaction.push({
+          Delete: {
+            TableName: this.config.coreTableName,
+            Key: key.eventIndex(
+              input.context.tenantId,
+              `STATUS#${event.status}`,
+              event.acceptedAt,
+              event.eventId,
+            ),
+          },
+        });
+        transaction.push({
+          Put: {
+            TableName: this.config.coreTableName,
+            Item: itemWithKeys(
+              {
+                eventId: updatedEvent.eventId,
+                status: updatedEvent.status,
+                acceptedAt: updatedEvent.acceptedAt,
+                expiresAt: epochSeconds(updatedEvent.expiresAt),
+              },
+              key.eventIndex(
+                input.context.tenantId,
+                `STATUS#${updatedEvent.status}`,
+                updatedEvent.acceptedAt,
+                updatedEvent.eventId,
+              ),
+              "EVENT_INDEX",
+            ),
+          },
+        });
+      }
+      if (input.outbox !== undefined) {
+        const shard = stableShard(
+          input.outbox.outboxId,
+          this.config.outboxShardCount,
+        );
+        transaction.push({
+          Put: {
+            TableName: this.config.coreTableName,
+            Item: itemWithKeys(
+              {
+                ...input.outbox,
+                expiresAt: epochSeconds(
+                  new Date(
+                    new Date(input.outbox.createdAt).getTime() + 7 * 86_400_000,
+                  ),
+                ),
+                GSI1PK: `OUTBOX#UNPUBLISHED#${shard}`,
+                GSI1SK: `${input.outbox.createdAt}#${input.outbox.outboxId}`,
+              },
+              key.outbox(shard, input.outbox.createdAt, input.outbox.outboxId),
+              "OUTBOX",
+            ),
+            ConditionExpression: "attribute_not_exists(PK)",
+          },
+        });
+      }
+      try {
+        await this.client.send(
+          new TransactWriteCommand({ TransactItems: transaction as never }),
+        );
+        return "created";
+      } catch (error) {
+        if (!isConditionalFailure(error)) throw error;
+      }
+    }
+    throw new Error("ROUTING_CONFLICT");
+  }
+  public async completeRouting(
+    context: TenantContext,
+    eventId: EventId,
+  ): Promise<void> {
+    for (let attempt = 0; attempt < 8; attempt += 1) {
+      const event = await this.getEvent(context, eventId);
+      if (event === undefined || event.outcome.routingComplete) return;
+      const outcome = { ...event.outcome, routingComplete: true };
+      const updated: CanonicalEvent = {
+        ...event,
+        outcome,
+        status: deriveEventStatus(outcome),
+        version: event.version + 1,
+      };
+      const transaction: unknown[] = [
+        {
+          Put: {
+            TableName: this.config.coreTableName,
+            Item: itemWithKeys(
+              { ...updated, expiresAt: epochSeconds(updated.expiresAt) },
+              key.event(context.tenantId, event.eventId),
+              "EVENT",
+            ),
+            ConditionExpression: "#version = :version",
+            ExpressionAttributeNames: { "#version": "version" },
+            ExpressionAttributeValues: { ":version": event.version },
+          },
+        },
+      ];
+      if (event.status !== updated.status) {
+        transaction.push({
+          Delete: {
+            TableName: this.config.coreTableName,
+            Key: key.eventIndex(
+              context.tenantId,
+              `STATUS#${event.status}`,
+              event.acceptedAt,
+              event.eventId,
+            ),
+          },
+        });
+        transaction.push({
+          Put: {
+            TableName: this.config.coreTableName,
+            Item: itemWithKeys(
+              {
+                eventId: updated.eventId,
+                status: updated.status,
+                acceptedAt: updated.acceptedAt,
+                expiresAt: epochSeconds(updated.expiresAt),
+              },
+              key.eventIndex(
+                context.tenantId,
+                `STATUS#${updated.status}`,
+                updated.acceptedAt,
+                updated.eventId,
+              ),
+              "EVENT_INDEX",
+            ),
+          },
+        });
+      }
+      try {
+        await this.client.send(
+          new TransactWriteCommand({ TransactItems: transaction as never }),
+        );
+        return;
+      } catch (error) {
+        if (!isConditionalFailure(error)) throw error;
+      }
+    }
+    throw new Error("ROUTING_COMPLETION_CONFLICT");
   }
   public async replaceIfVersion(
     context: TenantContext,
@@ -882,9 +1249,9 @@ export class DynamoPersistence
   }
   public async acquireLease(
     input: Parameters<DeliveryConcurrencyRepository["acquireLease"]>[0],
-  ): Promise<boolean> {
+  ): Promise<DeliveryExecution | undefined> {
     try {
-      await this.client.send(
+      const response = await this.client.send(
         new UpdateCommand({
           TableName: this.config.coreTableName,
           Key: key.delivery(
@@ -893,25 +1260,190 @@ export class DynamoPersistence
             input.deliveryId,
           ),
           UpdateExpression:
-            "SET leaseOwner = :owner, leaseToken = :token, leaseExpiresAt = :expires, #version = #version + :one",
+            "SET leaseOwner = :owner, leaseToken = :token, leaseAcquiredAt = :now, leaseExpiresAt = :expires, #state = :inProgress, #version = #version + :one",
           ConditionExpression:
-            "#version = :expected AND (attribute_not_exists(leaseExpiresAt) OR leaseExpiresAt < :now)",
-          ExpressionAttributeNames: { "#version": "version" },
+            "#version = :expected AND (#state = :scheduled OR (#state = :inProgress AND leaseExpiresAt < :now))",
+          ExpressionAttributeNames: {
+            "#version": "version",
+            "#state": "state",
+          },
           ExpressionAttributeValues: {
             ":owner": input.owner,
             ":token": input.token,
             ":expires": input.expiresAt,
             ":expected": input.expectedVersion,
             ":now": new Date().toISOString(),
+            ":scheduled": "scheduled",
+            ":inProgress": "in_progress",
             ":one": 1,
           },
+          ReturnValues: "ALL_NEW",
         }),
       );
-      return true;
+      return response.Attributes as DeliveryExecution | undefined;
     } catch (error) {
-      if (isConditionalFailure(error)) return false;
+      if (isConditionalFailure(error)) return undefined;
       throw error;
     }
+  }
+  public async finalizeSuccess(
+    input: Parameters<DeliveryConcurrencyRepository["finalizeSuccess"]>[0],
+  ): Promise<boolean> {
+    for (let retry = 0; retry < 8; retry += 1) {
+      const current = await this.getCore<DeliveryExecution>(
+        key.delivery(
+          input.context.tenantId,
+          input.eventId,
+          input.delivery.deliveryId,
+        ),
+      );
+      const event = await this.getEvent(input.context, input.eventId);
+      if (current === undefined || event === undefined) return false;
+      const outcome = {
+        ...event.outcome,
+        terminalDeliveries: event.outcome.terminalDeliveries + 1,
+        successfulDeliveries: event.outcome.successfulDeliveries + 1,
+      };
+      const updatedEvent: CanonicalEvent = {
+        ...event,
+        outcome,
+        status: deriveEventStatus(outcome),
+        version: event.version + 1,
+      };
+      const transaction: unknown[] = [
+        {
+          Put: {
+            TableName: this.config.coreTableName,
+            Item: itemWithKeys(
+              {
+                ...input.delivery,
+                expiresAt: epochSeconds(input.delivery.expiresAt),
+              },
+              key.delivery(
+                input.context.tenantId,
+                input.eventId,
+                input.delivery.deliveryId,
+              ),
+              "DELIVERY",
+            ),
+            ConditionExpression: "#version = :version AND leaseToken = :lease",
+            ExpressionAttributeNames: { "#version": "version" },
+            ExpressionAttributeValues: {
+              ":version": input.expectedVersion,
+              ":lease": current.leaseToken,
+            },
+          },
+        },
+        {
+          Put: {
+            TableName: this.config.coreTableName,
+            Item: itemWithKeys(
+              input.attempt,
+              key.attempt(
+                input.context.tenantId,
+                input.eventId,
+                input.attempt.deliveryId,
+                input.attempt.attemptNumber,
+              ),
+              "DELIVERY_ATTEMPT",
+            ),
+            ConditionExpression: "attribute_not_exists(PK)",
+          },
+        },
+        {
+          Put: {
+            TableName: this.config.coreTableName,
+            Item: itemWithKeys(
+              input.history,
+              key.history(
+                input.context.tenantId,
+                input.eventId,
+                input.history.deliveryId,
+                input.history.occurredAt,
+                input.history.historyId,
+              ),
+              "DELIVERY_HISTORY",
+            ),
+            ConditionExpression: "attribute_not_exists(PK)",
+          },
+        },
+        ...deliveryIndexCategories(current).map((category) => ({
+          Delete: {
+            TableName: this.config.coreTableName,
+            Key: key.deliveryIndex(
+              current.tenantId,
+              category,
+              current.updatedAt,
+              current.deliveryId,
+            ),
+          },
+        })),
+        ...deliveryIndexCategories(input.delivery).map((category) => ({
+          Put: {
+            TableName: this.config.coreTableName,
+            Item: deliveryIndexItem(input.delivery, category),
+          },
+        })),
+        {
+          Put: {
+            TableName: this.config.coreTableName,
+            Item: itemWithKeys(
+              {
+                ...updatedEvent,
+                expiresAt: epochSeconds(updatedEvent.expiresAt),
+              },
+              key.event(input.context.tenantId, input.eventId),
+              "EVENT",
+            ),
+            ConditionExpression: "#version = :version",
+            ExpressionAttributeNames: { "#version": "version" },
+            ExpressionAttributeValues: { ":version": event.version },
+          },
+        },
+      ];
+      if (event.status !== updatedEvent.status) {
+        transaction.push({
+          Delete: {
+            TableName: this.config.coreTableName,
+            Key: key.eventIndex(
+              input.context.tenantId,
+              `STATUS#${event.status}`,
+              event.acceptedAt,
+              event.eventId,
+            ),
+          },
+        });
+        transaction.push({
+          Put: {
+            TableName: this.config.coreTableName,
+            Item: itemWithKeys(
+              {
+                eventId: updatedEvent.eventId,
+                status: updatedEvent.status,
+                acceptedAt: updatedEvent.acceptedAt,
+                expiresAt: epochSeconds(updatedEvent.expiresAt),
+              },
+              key.eventIndex(
+                input.context.tenantId,
+                `STATUS#${updatedEvent.status}`,
+                updatedEvent.acceptedAt,
+                updatedEvent.eventId,
+              ),
+              "EVENT_INDEX",
+            ),
+          },
+        });
+      }
+      try {
+        await this.client.send(
+          new TransactWriteCommand({ TransactItems: transaction as never }),
+        );
+        return true;
+      } catch (error) {
+        if (!isConditionalFailure(error)) throw error;
+      }
+    }
+    return false;
   }
   public async putSeed(items: readonly Item[]): Promise<void> {
     for (const value of items)

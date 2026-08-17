@@ -83,7 +83,7 @@ await persistence.putSeed([
     tenantId,
     name: "local-demo-producer",
     status: "active",
-    scopes: ["events:submit"],
+    scopes: ["events:submit", "events:read"],
     secretVersions: [{ reference, state: "active", activatedAt: now }],
     createdAt: now,
     version: 1,

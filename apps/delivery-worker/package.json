@@ -5,5 +5,14 @@
   "type": "module",
   "scripts": {
     "build": "tsc --build"
+  },
+  "dependencies": {
+    "@aws-sdk/client-dynamodb": "3.1111.0",
+    "@aws-sdk/lib-dynamodb": "3.1111.0",
+    "@pirh/application": "workspace:*",
+    "@pirh/partner-http": "workspace:*",
+    "@pirh/persistence": "workspace:*",
+    "@pirh/queue": "workspace:*",
+    "@pirh/secrets": "workspace:*"
   }
 }

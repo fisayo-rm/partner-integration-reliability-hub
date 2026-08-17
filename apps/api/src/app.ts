@@ -3,6 +3,7 @@ import Fastify, { type FastifyInstance } from "fastify";
 import { createHmac, timingSafeEqual } from "node:crypto";
 import {
   apiMetaSchema,
+  canonicalEventRequestSchema,
   createDestinationRequestSchema,
   createPartnerRequestSchema,
   createSubscriptionRequestSchema,
@@ -11,20 +12,31 @@ import {
   updateDestinationRequestSchema,
   updatePartnerRequestSchema,
   validateTransformationRequestSchema,
+  eventAcceptanceResponseSchema,
+  eventStatusResponseSchema,
 } from "@pirh/contracts";
 import {
   ControlPlaneService,
+  EventIngestionService,
   type ControlPlaneRepository,
   type CoreRepository,
 } from "@pirh/application";
-import { requireRole, type ConsoleAuthenticator } from "@pirh/auth";
+import {
+  AuthenticationError,
+  requireRole,
+  type ConsoleAuthenticator,
+  type ProducerAuthenticator,
+} from "@pirh/auth";
 import type {
   Destination,
   Partner,
   TenantContext,
   TransformationVersion,
 } from "@pirh/domain";
-import { consoleAuthenticationHook } from "./auth.js";
+import {
+  consoleAuthenticationHook,
+  producerAuthenticationHook,
+} from "./auth.js";
 
 export interface HealthProbeResult {
   readonly name: string;
@@ -42,6 +54,12 @@ export interface ApiDependencies {
     readonly consoleAuthenticator: ConsoleAuthenticator;
     readonly cursorSecret: string;
   };
+  readonly eventIngestion?: {
+    readonly service: EventIngestionService;
+    readonly repository: CoreRepository;
+    readonly producerAuthenticator: ProducerAuthenticator;
+  };
+  readonly requestId?: () => string;
 }
 
 function cursor(secret: string, value: string): string {
@@ -92,7 +110,56 @@ function error(
 export async function buildApi(
   dependencies: ApiDependencies,
 ): Promise<FastifyInstance> {
-  const app = Fastify({ logger: false });
+  const app = Fastify(
+    dependencies.requestId === undefined
+      ? { logger: false }
+      : {
+          logger: false,
+          genReqId: () =>
+            dependencies.requestId?.() ?? "req_00000000000000000000000000",
+        },
+  );
+  app.addContentTypeParser(
+    "application/json",
+    { parseAs: "buffer" },
+    (request, body, done) => {
+      request.rawBody = Buffer.isBuffer(body) ? body : Buffer.from(body);
+      try {
+        done(null, JSON.parse(body.toString("utf8")));
+      } catch (caught) {
+        done(caught as Error);
+      }
+    },
+  );
+  app.setErrorHandler((caught, request, reply) => {
+    const correlationId = `cor_${request.id.slice(4)}`;
+    if (caught instanceof AuthenticationError)
+      return reply.code(caught.statusCode).send({
+        error: {
+          code: caught.statusCode === 403 ? "FORBIDDEN" : "UNAUTHORIZED",
+          message: "Authentication failed.",
+          requestId: request.id,
+          correlationId,
+        },
+      });
+    if ((caught as { statusCode?: number }).statusCode === 413)
+      return reply.code(413).send({
+        error: {
+          code: "PAYLOAD_TOO_LARGE",
+          message: "The request body exceeds 128 KiB.",
+          requestId: request.id,
+          correlationId,
+        },
+      });
+    return reply.code(400).send({
+      error: {
+        code: "VALIDATION_ERROR",
+        message: "The request is invalid.",
+        requestId: request.id,
+        correlationId,
+      },
+    });
+  });
   await app.register(swagger, {
     openapi: {
       openapi: "3.1.0",
@@ -155,6 +222,128 @@ export async function buildApi(
       }),
   );
   app.get("/openapi.json", async () => app.swagger());
+  const ingestion = dependencies.eventIngestion;
+  if (ingestion !== undefined) {
+    const producerSubmit = producerAuthenticationHook(
+      ingestion.producerAuthenticator,
+      "events:submit",
+    );
+    const producerRead = producerAuthenticationHook(
+      ingestion.producerAuthenticator,
+      "events:read",
+    );
+    app.post(
+      "/api/v1/events",
+      {
+        preHandler: producerSubmit,
+        bodyLimit: 128 * 1024,
+      },
+      async (request, reply) => {
+        const idempotencyKey = request.headers["idempotency-key"];
+        if (
+          typeof idempotencyKey !== "string" ||
+          idempotencyKey.length === 0 ||
+          idempotencyKey.length > 256
+        )
+          return reply.code(400).send({
+            error: {
+              code: "VALIDATION_ERROR",
+              message: "Idempotency-Key is required.",
+              requestId: request.id,
+              correlationId: `cor_${request.id.slice(4)}`,
+            },
+          });
+        try {
+          const parsed = canonicalEventRequestSchema.parse(request.body);
+          const accepted = await ingestion.service.accept(
+            request.tenantContext as TenantContext,
+            {
+              eventType: parsed.eventType,
+              occurredAt: parsed.occurredAt,
+              subject: parsed.subject,
+              data: parsed.data as never,
+              metadata: parsed.metadata as never,
+              idempotencyKey,
+            },
+          );
+          const body = eventAcceptanceResponseSchema.parse({
+            eventId: accepted.event.eventId,
+            correlationId: accepted.event.correlationId,
+            status: "accepted",
+            previouslyAccepted: accepted.previouslyAccepted,
+            acceptedAt: accepted.event.acceptedAt,
+          });
+          console.log(
+            JSON.stringify({
+              service: "api",
+              event: "event.accepted",
+              eventId: body.eventId,
+              correlationId: body.correlationId,
+              duplicate: body.previouslyAccepted,
+            }),
+          );
+          return reply
+            .code(accepted.previouslyAccepted ? 200 : 202)
+            .header("x-correlation-id", body.correlationId)
+            .send(body);
+        } catch (caught) {
+          if (
+            caught instanceof Error &&
+            caught.message === "IDEMPOTENCY_KEY_REUSED"
+          )
+            return reply.code(409).send({
+              error: {
+                code: "IDEMPOTENCY_KEY_REUSED",
+                message:
+                  "The idempotency key was used with a different request.",
+                requestId: request.id,
+                correlationId: `cor_${request.id.slice(4)}`,
+              },
+            });
+          if (
+            caught instanceof Error &&
+            caught.message === "UNSUPPORTED_EVENT_TYPE"
+          )
+            return reply.code(400).send({
+              error: {
+                code: "UNSUPPORTED_EVENT_TYPE",
+                message: "The event type is not supported.",
+                requestId: request.id,
+                correlationId: `cor_${request.id.slice(4)}`,
+              },
+            });
+          throw caught;
+        }
+      },
+    );
+    app.get(
+      "/api/v1/events/:eventId",
+      { preHandler: producerRead },
+      async (request, reply) => {
+        const event = await ingestion.repository.getEvent(
+          request.tenantContext as TenantContext,
+          (request.params as { eventId: never }).eventId,
+        );
+        if (event === undefined)
+          return reply.code(404).send({
+            error: {
+              code: "NOT_FOUND",
+              message: "Event not found.",
+              requestId: request.id,
+              correlationId: `cor_${request.id.slice(4)}`,
+            },
+          });
+        const body = eventStatusResponseSchema.parse({
+          eventId: event.eventId,
+          correlationId: event.correlationId,
+          eventType: event.eventType,
+          acceptedAt: event.acceptedAt,
+          status: event.status,
+        });
+        return reply.header("x-correlation-id", body.correlationId).send(body);
+      },
+    );
+  }
   const control = dependencies.controlPlane;
   if (control !== undefined) {
     const authenticated = consoleAuthenticationHook(

@@ -107,6 +107,7 @@ async function verify(profile) {
     "/bin/sh /bootstrap/bootstrap.sh && /bin/sh /bootstrap/assert.sh",
   ]);
   await pnpm(["test:integration"]);
+  await pnpm(["demo:m04"]);
   if (profile === "observability") {
     for (const [url, label, maxAttempts] of [
       ["http://localhost:13133/", "OpenTelemetry collector"],
@@ -121,13 +122,17 @@ async function verify(profile) {
 try {
   await docker(["config", "--quiet"]);
   await verify();
-  await docker(["down", "--volumes", "--remove-orphans"]);
+  await docker(["down", "--timeout", "15", "--volumes", "--remove-orphans"]);
   await verify("observability");
   console.log(
     "Local platform verification passed for default and observability profiles.",
   );
 } finally {
-  await docker(["down", "--volumes", "--remove-orphans"]).catch(
-    () => undefined,
-  );
+  await docker([
+    "down",
+    "--timeout",
+    "15",
+    "--volumes",
+    "--remove-orphans",
+  ]).catch(() => undefined);
 }

@@ -105,7 +105,10 @@ export interface CanonicalEvent {
   readonly data: JsonObject;
   readonly metadata: JsonObject;
   readonly payloadHash: string;
+  /** Stored materialization of the outcome counters for efficient status reads. */
+  readonly status: EventStatus;
   readonly outcome: EventOutcomeCounters;
+  readonly version: number;
   readonly expiresAt: IsoInstant;
 }
 
@@ -264,6 +267,8 @@ export interface DeliveryConfigurationSnapshot {
   readonly rateLimitPolicyId: string;
   readonly circuitBreakerPolicyId: string;
   readonly authType: DestinationAuthType;
+  /** Non-secret auth settings required to execute the immutable delivery. */
+  readonly authConfiguration: JsonObject;
   readonly secretReferenceNames: readonly string[];
   readonly transformationId: TransformationId;
   readonly transformationVersion: number;
@@ -273,6 +278,7 @@ export interface DeliveryConfigurationSnapshot {
 export interface DeliveryExecution {
   readonly deliveryId: DeliveryId;
   readonly eventId: EventId;
+  readonly correlationId: CorrelationId;
   readonly tenantId: TenantId;
   readonly partnerId: PartnerId;
   readonly destinationId: DestinationId;
@@ -303,6 +309,7 @@ export interface DeliveryAttempt {
   readonly attemptId: AttemptId;
   readonly attemptNumber: number;
   readonly deliveryId: DeliveryId;
+  readonly correlationId: CorrelationId;
   readonly startedAt: IsoInstant;
   readonly completedAt?: IsoInstant;
   readonly durationMs?: number;
@@ -323,6 +330,7 @@ export interface DeliveryHistoryEntry {
   readonly historyId: string;
   readonly deliveryId: DeliveryId;
   readonly tenantId: TenantId;
+  readonly correlationId: CorrelationId;
   readonly type:
     | "created"
     | "queued"

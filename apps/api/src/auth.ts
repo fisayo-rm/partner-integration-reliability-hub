@@ -34,9 +34,7 @@ function requestIds(
   return {
     requestId: request.id,
     correlationId:
-      (request.headers["x-correlation-id"] as
-        | TenantContext["correlationId"]
-        | undefined) ?? (`cor_${request.id}` as TenantContext["correlationId"]),
+      `cor_${request.id.slice(4)}` as TenantContext["correlationId"],
   };
 }
 export function consoleAuthenticationHook(
@@ -55,8 +53,7 @@ export function producerAuthenticationHook(
   requiredScope: string,
 ): preHandlerHookHandler {
   return async (request) => {
-    const rawBody = request.rawBody;
-    if (rawBody === undefined) throw new AuthenticationError();
+    const rawBody = request.rawBody ?? Buffer.alloc(0);
     request.tenantContext = await authenticator.authenticate({
       method: request.method,
       path: request.url.split("?", 1)[0] ?? request.url,

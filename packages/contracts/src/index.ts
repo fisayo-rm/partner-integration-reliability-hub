@@ -62,6 +62,23 @@ export const eventAcceptanceResponseSchema = z
 export type EventAcceptanceResponse = z.infer<
   typeof eventAcceptanceResponseSchema
 >;
+export const eventStatusResponseSchema = z
+  .object({
+    eventId: identifier("evt"),
+    correlationId: identifier("cor"),
+    eventType: z.string().min(1),
+    acceptedAt: isoInstant,
+    status: z.enum([
+      "accepted",
+      "processing",
+      "partially_succeeded",
+      "succeeded",
+      "failed",
+      "no_destinations",
+    ]),
+  })
+  .strict();
+export type EventStatusResponse = z.infer<typeof eventStatusResponseSchema>;
 
 export const apiErrorSchema = z
   .object({

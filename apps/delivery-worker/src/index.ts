@@ -1,2 +1,141 @@
-/** M00 placeholder. */
+import { DynamoDBClient } from "@aws-sdk/client-dynamodb";
+import { DynamoDBDocumentClient } from "@aws-sdk/lib-dynamodb";
+import { DeliveryService, type OAuthTokenProvider } from "@pirh/application";
+import { SafePartnerHttpClient } from "@pirh/partner-http";
+import { DynamoPersistence } from "@pirh/persistence";
+import { consumeOne, createSqsClient, ElasticMqQueue } from "@pirh/queue";
+import { LocalDynamoDbSecretStore } from "@pirh/secrets";
+
+const region = process.env.AWS_REGION ?? "us-east-1";
+const credentials = { accessKeyId: "local", secretAccessKey: "local" };
+const coreTableName = process.env.CORE_TABLE_NAME ?? "pirh-core-local";
+const documentClient = DynamoDBDocumentClient.from(
+  new DynamoDBClient({
+    region,
+    endpoint: process.env.DYNAMODB_ENDPOINT ?? "http://dynamodb-local:8000",
+    credentials,
+  }),
+);
+const persistence = new DynamoPersistence(documentClient, {
+  coreTableName,
+  auditTableName: process.env.AUDIT_TABLE_NAME ?? "pirh-audit-local",
+  outboxShardCount: Number(process.env.OUTBOX_SHARD_COUNT ?? 8),
+});
+const http = new SafePartnerHttpClient({
+  mode: "local",
+  localHttpHostnames: ["mock-partner-alpha", "mock-partner-beta"],
+});
+const cache = new Map<
+  string,
+  { readonly value: string; readonly expiresAt: number }
+>();
+const oauth: OAuthTokenProvider = {
+  async get(input) {
+    const key = `${input.destinationId}\n${input.scopes.join(" ")}`;
+    const existing = cache.get(key);
+    if (existing !== undefined && existing.expiresAt > Date.now() + 5_000)
+      return existing.value;
+    const params = new URLSearchParams({ grant_type: "client_credentials" });
+    if (input.scopes.length > 0) params.set("scope", input.scopes.join(" "));
+    const headers: Record<string, string> = {
+      "content-type": "application/x-www-form-urlencoded",
+    };
+    if (input.authenticationStyle === "basic")
+      headers.authorization = `Basic ${Buffer.from(`${input.clientId}:${input.clientSecret}`).toString("base64")}`;
+    else {
+      params.set("client_id", input.clientId);
+      params.set("client_secret", input.clientSecret);
+    }
+    const response = await http.send({
+      url: input.tokenUrl,
+      method: "POST",
+      headers,
+      body: params.toString(),
+      timeoutMs: 5_000,
+      correlationId: input.correlationId,
+    });
+    if (response.status < 200 || response.status >= 300)
+      throw new Error("OAUTH_TOKEN_ERROR");
+    const token = JSON.parse(response.body) as {
+      readonly access_token?: unknown;
+      readonly expires_in?: unknown;
+    };
+    if (typeof token.access_token !== "string")
+      throw new Error("OAUTH_TOKEN_ERROR");
+    const expiresIn =
+      typeof token.expires_in === "number" ? token.expires_in : 60;
+    cache.set(key, {
+      value: token.access_token,
+      expiresAt: Date.now() + Math.max(1, expiresIn - 5) * 1_000,
+    });
+    return token.access_token;
+  },
+};
+const alphabet = "0123456789ABCDEFGHJKMNPQRSTVWXYZ";
+let sequence = 0;
+const ids = {
+  next(prefix: string) {
+    const raw =
+      `${Date.now().toString(32).toUpperCase()}${(++sequence).toString(32).toUpperCase()}`
+        .padEnd(26, "0")
+        .slice(0, 26);
+    return `${prefix}_${raw
+      .split("")
+      .map((value) => (alphabet.includes(value) ? value : "0"))
+      .join("")}`;
+  },
+};
+const service = new DeliveryService({
+  core: persistence,
+  repository: persistence,
+  secrets: new LocalDynamoDbSecretStore(documentClient, {
+    coreTableName,
+    masterKeyBase64: process.env.LOCAL_SECRET_MASTER_KEY_B64 ?? "",
+  }),
+  http,
+  oauth,
+  ids: ids as never,
+  clock: { now: () => new Date() },
+});
+const queue = new ElasticMqQueue(
+  createSqsClient({
+    region,
+    endpoint: process.env.ELASTICMQ_ENDPOINT ?? "http://elasticmq:9324",
+    credentials,
+  }),
+  process.env.DELIVERY_QUEUE_NAME ?? "pirh-delivery-local",
+);
+let stopping = false;
+for (const signal of ["SIGINT", "SIGTERM"] as const)
+  process.on(signal, () => {
+    stopping = true;
+  });
+while (!stopping) {
+  try {
+    await consumeOne(queue, async (message) => {
+      if (message.messageType !== "DELIVER") return;
+      await service.deliver({
+        ...message,
+        owner: process.env.HOSTNAME ?? "delivery-worker",
+      } as never);
+      console.log(
+        JSON.stringify({
+          service: "delivery-worker",
+          event: "delivery.completed",
+          correlationId: message.correlationId,
+          eventId: message.eventId,
+          deliveryId: message.deliveryId,
+        }),
+      );
+    });
+  } catch (error) {
+    console.error(
+      JSON.stringify({
+        service: "delivery-worker",
+        event: "delivery.failed",
+        error: error instanceof Error ? error.message : "unknown",
+      }),
+    );
+  }
+}
 export {};

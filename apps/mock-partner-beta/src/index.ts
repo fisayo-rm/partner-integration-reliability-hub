@@ -15,6 +15,16 @@ export function buildMockPartnerBeta(
   },
 ) {
   const app = Fastify({ logger: false });
+  app.addContentTypeParser(
+    "application/x-www-form-urlencoded",
+    { parseAs: "string" },
+    (_request, body, done) => {
+      const parsed: Record<string, string> = {};
+      for (const [key, value] of new URLSearchParams(String(body)).entries())
+        parsed[key] = value;
+      done(null, parsed);
+    },
+  );
   let mode: "success" | "429" | "503" | "timeout" = "success";
   const tokens = new Set<string>();
   const captures: unknown[] = [];

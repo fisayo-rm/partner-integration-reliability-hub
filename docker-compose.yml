@@ -107,6 +107,8 @@ services:
       OIDC_ISSUER: http://localhost:8080/realms/pirh-local
       LOCAL_SECRET_MASTER_KEY_B64: ${LOCAL_SECRET_MASTER_KEY_B64:-}
       LOCAL_SEED_PRODUCER_SECRET: ${LOCAL_SEED_PRODUCER_SECRET:-}
+      LOCAL_SEED_ALPHA_API_KEY: ${LOCAL_SEED_ALPHA_API_KEY:-}
+      LOCAL_SEED_BETA_CLIENT_SECRET: ${LOCAL_SEED_BETA_CLIENT_SECRET:-}
 
   api:
     image: pirh-m01-node:local
@@ -121,6 +123,13 @@ services:
       API_PORT: "3000"
       DYNAMODB_ENDPOINT: http://dynamodb-local:8000
       ELASTICMQ_ENDPOINT: http://elasticmq:9324
+      CORE_TABLE_NAME: pirh-core-local
+      AUDIT_TABLE_NAME: pirh-audit-local
+      OIDC_ISSUER: http://localhost:8080/realms/pirh-local
+      OIDC_JWKS_URI: http://keycloak:8080/realms/pirh-local/protocol/openid-connect/certs
+      OIDC_AUDIENCE: pirh-console
+      LOCAL_SECRET_MASTER_KEY_B64: ${LOCAL_SECRET_MASTER_KEY_B64:-}
+      LOCAL_CURSOR_SECRET: ${LOCAL_CURSOR_SECRET:-local-cursor-secret}
     ports: ["3000:3000"]
     healthcheck:
       test:
@@ -160,8 +169,13 @@ services:
     depends_on: { bootstrap: { condition: service_completed_successfully } }
     environment: { PORT: "3004", SERVICE_NAME: outbox-reconciler }
   mock-partner-alpha:
-    <<: *placeholder
-    environment: { PORT: "4011", SERVICE_NAME: mock-partner-alpha }
+    image: pirh-m01-node:local
+    build: *node-build
+    command: ["node", "apps/mock-partner-alpha/dist/index.js"]
+    environment:
+      PORT: "4011"
+      MOCK_ALPHA_API_KEY: "${LOCAL_SEED_ALPHA_API_KEY:-}"
+      MOCK_CONTROL_TOKEN: "${MOCK_CONTROL_TOKEN:-}"
     ports: ["4011:4011"]
     healthcheck:
       test:
@@ -173,8 +187,14 @@ services:
       timeout: 3s
       retries: 20
   mock-partner-beta:
-    <<: *placeholder
-    environment: { PORT: "4012", SERVICE_NAME: mock-partner-beta }
+    image: pirh-m01-node:local
+    build: *node-build
+    command: ["node", "apps/mock-partner-beta/dist/index.js"]
+    environment:
+      PORT: "4012"
+      MOCK_BETA_CLIENT_ID: beta-demo
+      MOCK_BETA_CLIENT_SECRET: "${LOCAL_SEED_BETA_CLIENT_SECRET:-}"
+      MOCK_CONTROL_TOKEN: "${MOCK_CONTROL_TOKEN:-}"
     ports: ["4012:4012"]
     healthcheck:
       test:

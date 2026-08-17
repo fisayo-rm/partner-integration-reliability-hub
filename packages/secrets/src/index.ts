@@ -1,7 +1,7 @@
 import { createCipheriv, createDecipheriv, randomBytes } from "node:crypto";
 import {
   GetCommand,
-  PutCommand,
+  TransactWriteCommand,
   type DynamoDBDocumentClient,
 } from "@aws-sdk/lib-dynamodb";
 import type { SecretReference, TenantContext } from "@pirh/domain";
@@ -21,6 +21,12 @@ function secretKey(context: TenantContext, name: string, version: string) {
   return {
     PK: `TENANT#${context.tenantId}#SECRET`,
     SK: `SECRET#${name}#VERSION#${version}`,
+  };
+}
+function secretHeadKey(context: TenantContext, name: string) {
+  return {
+    PK: `TENANT#${context.tenantId}#SECRET`,
+    SK: `SECRET#${name}#CURRENT`,
   };
 }
 function associatedData(
@@ -69,15 +75,32 @@ export class LocalDynamoDbSecretStore implements SecretStore {
       version,
     };
     await this.client.send(
-      new PutCommand({
-        TableName: this.config.coreTableName,
-        Item: {
-          ...secretKey(context, input.name, version),
-          entityType: "LOCAL_SECRET",
-          ...record,
-          createdAt: new Date().toISOString(),
-        },
-        ConditionExpression: "attribute_not_exists(PK)",
+      new TransactWriteCommand({
+        TransactItems: [
+          {
+            Put: {
+              TableName: this.config.coreTableName,
+              Item: {
+                ...secretKey(context, input.name, version),
+                entityType: "LOCAL_SECRET",
+                ...record,
+                createdAt: new Date().toISOString(),
+              },
+              ConditionExpression: "attribute_not_exists(PK)",
+            },
+          },
+          {
+            Put: {
+              TableName: this.config.coreTableName,
+              Item: {
+                ...secretHeadKey(context, input.name),
+                entityType: "LOCAL_SECRET_HEAD",
+                version,
+                updatedAt: new Date().toISOString(),
+              },
+            },
+          },
+        ],
       }),
     );
     return { name: input.name, version };
@@ -86,12 +109,22 @@ export class LocalDynamoDbSecretStore implements SecretStore {
     context: TenantContext,
     reference: SecretReference,
   ): Promise<{ readonly value: string; readonly version?: string }> {
-    if (reference.version === undefined)
-      throw new Error("Secret references must include a version.");
+    let version = reference.version;
+    if (version === undefined) {
+      const head = await this.client.send(
+        new GetCommand({
+          TableName: this.config.coreTableName,
+          Key: secretHeadKey(context, reference.name),
+        }),
+      );
+      if (typeof head.Item?.version !== "string")
+        throw new Error("Secret reference could not be resolved.");
+      version = head.Item.version;
+    }
     const response = await this.client.send(
       new GetCommand({
         TableName: this.config.coreTableName,
-        Key: secretKey(context, reference.name, reference.version),
+        Key: secretKey(context, reference.name, version),
       }),
     );
     if (response.Item === undefined)
@@ -103,15 +136,13 @@ export class LocalDynamoDbSecretStore implements SecretStore {
         this.masterKey,
         Buffer.from(stored.iv, "base64"),
       );
-      decipher.setAAD(
-        associatedData(context, reference.name, reference.version),
-      );
+      decipher.setAAD(associatedData(context, reference.name, version));
       decipher.setAuthTag(Buffer.from(stored.tag, "base64"));
       const value = Buffer.concat([
         decipher.update(Buffer.from(stored.ciphertext, "base64")),
         decipher.final(),
       ]).toString("utf8");
-      return { value, version: reference.version };
+      return { value, version };
     } catch {
       throw new Error("Secret reference could not be resolved.");
     }

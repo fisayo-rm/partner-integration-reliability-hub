@@ -70,12 +70,18 @@ importers:
       "@pirh/domain":
         specifier: workspace:*
         version: link:../../packages/domain
+      "@pirh/partner-http":
+        specifier: workspace:*
+        version: link:../../packages/partner-http
       "@pirh/persistence":
         specifier: workspace:*
         version: link:../../packages/persistence
       "@pirh/secrets":
         specifier: workspace:*
         version: link:../../packages/secrets
+      "@pirh/transformation":
+        specifier: workspace:*
+        version: link:../../packages/transformation
       fastify:
         specifier: 5.8.5
         version: 5.8.5
@@ -86,9 +92,23 @@ importers:
 
   apps/delivery-worker: {}
 
-  apps/mock-partner-alpha: {}
+  apps/mock-partner-alpha:
+    dependencies:
+      "@pirh/contracts":
+        specifier: workspace:*
+        version: link:../../packages/contracts
+      fastify:
+        specifier: 5.8.5
+        version: 5.8.5
 
-  apps/mock-partner-beta: {}
+  apps/mock-partner-beta:
+    dependencies:
+      "@pirh/contracts":
+        specifier: workspace:*
+        version: link:../../packages/contracts
+      fastify:
+        specifier: 5.8.5
+        version: 5.8.5
 
   apps/outbox-reconciler: {}
 
@@ -128,7 +148,14 @@ importers:
 
   packages/observability: {}
 
-  packages/partner-http: {}
+  packages/partner-http:
+    dependencies:
+      "@pirh/application":
+        specifier: workspace:*
+        version: link:../application
+      "@pirh/domain":
+        specifier: workspace:*
+        version: link:../domain
 
   packages/persistence:
     dependencies:
@@ -165,7 +192,14 @@ importers:
         specifier: workspace:*
         version: link:../domain
 
-  packages/transformation: {}
+  packages/transformation:
+    dependencies:
+      "@pirh/contracts":
+        specifier: workspace:*
+        version: link:../contracts
+      "@pirh/domain":
+        specifier: workspace:*
+        version: link:../domain
 
 packages:
   "@aws-sdk/client-dynamodb@3.1111.0":

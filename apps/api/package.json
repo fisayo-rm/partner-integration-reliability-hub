@@ -24,6 +24,8 @@
     "@pirh/domain": "workspace:*",
     "@pirh/persistence": "workspace:*",
     "@pirh/secrets": "workspace:*",
+    "@pirh/transformation": "workspace:*",
+    "@pirh/partner-http": "workspace:*",
     "fastify": "5.8.5"
   }
 }

@@ -6,6 +6,10 @@ const composeEnvironment = {
   ...process.env,
   LOCAL_SECRET_MASTER_KEY_B64: randomBytes(32).toString("base64"),
   LOCAL_SEED_PRODUCER_SECRET: randomBytes(32).toString("base64url"),
+  LOCAL_SEED_ALPHA_API_KEY: randomBytes(24).toString("base64url"),
+  LOCAL_SEED_BETA_CLIENT_SECRET: randomBytes(24).toString("base64url"),
+  LOCAL_CURSOR_SECRET: randomBytes(32).toString("base64url"),
+  MOCK_CONTROL_TOKEN: randomBytes(24).toString("base64url"),
 };
 const base = [
   "compose",

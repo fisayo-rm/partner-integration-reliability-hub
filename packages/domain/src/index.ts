@@ -16,6 +16,7 @@ export type CorrelationId = Brand<string, "CorrelationId">;
 export type ReplayId = Brand<string, "ReplayId">;
 export type TransformationId = Brand<string, "TransformationId">;
 export type SubscriptionId = Brand<string, "SubscriptionId">;
+export type ExternalKey = Brand<string, "ExternalKey">;
 export type ClientId = Brand<string, "ClientId">;
 export type LeaseToken = Brand<string, "LeaseToken">;
 export type IsoInstant = Brand<string, "IsoInstant">;
@@ -112,6 +113,7 @@ export interface Partner {
   readonly partnerId: PartnerId;
   readonly tenantId: TenantId;
   readonly name: string;
+  readonly externalKey: ExternalKey;
   readonly description?: string;
   readonly enabled: boolean;
   readonly createdAt: IsoInstant;
@@ -157,6 +159,7 @@ export interface Destination {
   readonly partnerId: PartnerId;
   readonly tenantId: TenantId;
   readonly name: string;
+  readonly externalKey: ExternalKey;
   readonly baseUrl: string;
   readonly path: string;
   readonly method: "POST";
@@ -182,6 +185,7 @@ export interface DestinationConfigurationVersion {
 }
 export interface TransformationVersion {
   readonly transformationId: TransformationId;
+  readonly externalKey: ExternalKey;
   readonly tenantId: TenantId;
   readonly version: number;
   readonly definition: JsonObject;
@@ -190,6 +194,7 @@ export interface TransformationVersion {
 }
 export interface Subscription {
   readonly subscriptionId: SubscriptionId;
+  readonly externalKey: ExternalKey;
   readonly tenantId: TenantId;
   readonly destinationId: DestinationId;
   readonly eventType: string;

@@ -144,31 +144,45 @@ export const partnerBetaPayloadSchema = z
   })
   .strict();
 
-const mappingSchema = z
-  .object({
-    target: z.string().regex(/^\$\.[A-Za-z0-9_.]+$/),
-    source: z
-      .string()
-      .regex(/^\$\.[A-Za-z0-9_.]+$/)
-      .optional(),
+const jsonPath = z.string().regex(/^\$\.[A-Za-z0-9_.]+$/);
+const valueOperandSchema = z
+  .object({ source: jsonPath.optional(), literal: jsonValueSchema.optional() })
+  .strict()
+  .refine(
+    (value) => value.source !== undefined || value.literal !== undefined,
+    "Operand requires source or literal.",
+  );
+const mappingBase = z
+  .object({ target: jsonPath, required: z.boolean().optional() })
+  .strict();
+const directMappingSchema = mappingBase
+  .extend({
+    source: jsonPath.optional(),
     literal: jsonValueSchema.optional(),
     transform: z
-      .enum([
-        "UPPERCASE",
-        "LOWERCASE",
-        "UPPER_SNAKE",
-        "ISO_DATE",
-        "CONCAT",
-        "ENUM_MAP",
-      ])
+      .enum(["UPPERCASE", "LOWERCASE", "UPPER_SNAKE", "ISO_DATE"])
       .optional(),
-    required: z.boolean().optional(),
   })
-  .strict()
   .refine(
     (mapping) => mapping.source !== undefined || mapping.literal !== undefined,
     "Mapping requires source or literal.",
   );
+const concatMappingSchema = mappingBase.extend({
+  transform: z.literal("CONCAT"),
+  parts: z.array(valueOperandSchema).min(1).max(10),
+  separator: z.string().max(256).optional(),
+});
+const enumMappingSchema = mappingBase.extend({
+  source: jsonPath,
+  transform: z.literal("ENUM_MAP"),
+  values: z.record(z.string(), jsonValueSchema),
+  default: jsonValueSchema.optional(),
+});
+const mappingSchema = z.union([
+  directMappingSchema,
+  concatMappingSchema,
+  enumMappingSchema,
+]);
 export const transformationDefinitionSchema = z
   .object({
     schemaVersion: z.literal(1),
@@ -179,7 +193,14 @@ export const transformationDefinitionSchema = z
   .superRefine((definition, context) => {
     const targets = new Set<string>();
     definition.mappings.forEach((mapping, index) => {
-      if (targets.has(mapping.target))
+      if (
+        [...targets].some(
+          (target) =>
+            target === mapping.target ||
+            target.startsWith(`${mapping.target}.`) ||
+            mapping.target.startsWith(`${target}.`),
+        )
+      )
         context.addIssue({
           code: "custom",
           path: ["mappings", index, "target"],
@@ -190,6 +211,169 @@ export const transformationDefinitionSchema = z
   });
 export type TransformationDefinition = z.infer<
   typeof transformationDefinitionSchema
+>;
+
+const externalKey = z
+  .string()
+  .min(1)
+  .max(96)
+  .regex(/^[a-z][a-z0-9_-]*$/);
+const retryPolicySchema = z
+  .object({
+    maxAttempts: z.number().int().positive(),
+    initialDelaySeconds: z.number().positive(),
+    multiplier: z.number().positive(),
+    maxDelaySeconds: z.number().positive(),
+    jitter: z.literal("FULL_UPPER_HALF"),
+  })
+  .strict();
+const rateLimitPolicySchema = z
+  .object({
+    requestsPerInterval: z.number().int().positive(),
+    intervalSeconds: z.number().positive(),
+    burstCapacity: z.number().int().positive(),
+    safetyFactor: z.number().positive().max(1),
+  })
+  .strict();
+const circuitPolicySchema = z
+  .object({
+    failureThreshold: z.number().int().positive(),
+    cooldownSeconds: z.number().positive(),
+    probeLeaseSeconds: z.number().positive(),
+  })
+  .strict();
+const secretInputSchema = z
+  .object({
+    alias: externalKey,
+    value: z
+      .string()
+      .min(1)
+      .max(16 * 1024),
+  })
+  .strict();
+const apiKeyAuthenticationSchema = z
+  .object({
+    type: z.literal("api_key"),
+    headerName: z
+      .string()
+      .regex(/^X-[A-Za-z0-9-]{1,64}$/)
+      .default("X-API-Key"),
+    idempotencyHeader: z
+      .string()
+      .regex(/^[A-Za-z0-9-]{1,64}$/)
+      .default("Idempotency-Key"),
+    credential: secretInputSchema,
+  })
+  .strict();
+const oauthAuthenticationSchema = z
+  .object({
+    type: z.literal("oauth_client_credentials"),
+    tokenUrl: z.string().url(),
+    clientId: z.string().min(1).max(256),
+    scopes: z.array(z.string().min(1).max(128)).max(20).default([]),
+    authenticationStyle: z.enum(["basic", "body"]).default("basic"),
+    credential: secretInputSchema,
+  })
+  .strict();
+export const destinationAuthenticationSchema = z.discriminatedUnion("type", [
+  apiKeyAuthenticationSchema,
+  oauthAuthenticationSchema,
+]);
+const destinationBaseSchema = z
+  .object({
+    name: z.string().min(1).max(128),
+    externalKey,
+    baseUrl: z.string().url(),
+    path: z.string().regex(/^\/[A-Za-z0-9_./-]*$/),
+    enabled: z.boolean().default(true),
+    method: z.literal("POST").default("POST"),
+    authentication: destinationAuthenticationSchema,
+    timeoutMs: z.number().int().min(100).max(30_000),
+    retryPolicy: retryPolicySchema,
+    rateLimitPolicy: rateLimitPolicySchema,
+    circuitBreakerPolicy: circuitPolicySchema,
+    transformationId: identifier("trf"),
+    activeTransformationVersion: z.number().int().positive(),
+    sensitiveResponseJsonPaths: z.array(jsonPath).max(50).default([]),
+  })
+  .strict();
+export const createPartnerRequestSchema = z
+  .object({
+    name: z.string().min(1).max(128),
+    externalKey,
+    description: z.string().max(1024).optional(),
+    enabled: z.boolean().default(true),
+  })
+  .strict();
+export const updatePartnerRequestSchema = z
+  .object({
+    name: z.string().min(1).max(128).optional(),
+    description: z.string().max(1024).nullable().optional(),
+    enabled: z.boolean().optional(),
+  })
+  .strict()
+  .refine(
+    (value) => Object.keys(value).length > 0,
+    "Update requires at least one field.",
+  );
+export const createDestinationRequestSchema = destinationBaseSchema;
+export const updateDestinationRequestSchema = z
+  .object({
+    name: z.string().min(1).max(128).optional(),
+    baseUrl: z.string().url().optional(),
+    path: z
+      .string()
+      .regex(/^\/[A-Za-z0-9_./-]*$/)
+      .optional(),
+    enabled: z.boolean().optional(),
+    timeoutMs: z.number().int().min(100).max(30_000).optional(),
+    retryPolicy: retryPolicySchema.optional(),
+    rateLimitPolicy: rateLimitPolicySchema.optional(),
+    circuitBreakerPolicy: circuitPolicySchema.optional(),
+    transformationId: identifier("trf").optional(),
+    activeTransformationVersion: z.number().int().positive().optional(),
+    sensitiveResponseJsonPaths: z.array(jsonPath).max(50).optional(),
+    authentication: destinationAuthenticationSchema.optional(),
+  })
+  .strict()
+  .refine(
+    (value) => Object.keys(value).length > 0,
+    "Update requires at least one field.",
+  );
+export const createTransformationRequestSchema = z
+  .object({
+    externalKey,
+    definition: transformationDefinitionSchema,
+    sampleEvent: jsonObjectSchema.optional(),
+  })
+  .strict();
+export const createTransformationVersionRequestSchema = z
+  .object({
+    definition: transformationDefinitionSchema,
+    sampleEvent: jsonObjectSchema.optional(),
+  })
+  .strict();
+export const validateTransformationRequestSchema = z
+  .object({
+    definition: transformationDefinitionSchema,
+    sampleEvent: jsonObjectSchema,
+  })
+  .strict();
+export const createSubscriptionRequestSchema = z
+  .object({
+    externalKey,
+    destinationId: identifier("dst"),
+    eventType: z
+      .string()
+      .min(1)
+      .max(128)
+      .regex(/^[a-z][a-z0-9_.-]*$/),
+    enabled: z.boolean().default(true),
+  })
+  .strict();
+export type CreatePartnerRequest = z.infer<typeof createPartnerRequestSchema>;
+export type CreateDestinationRequest = z.infer<
+  typeof createDestinationRequestSchema
 >;
 
 export const paginationCursorPayloadSchema = z

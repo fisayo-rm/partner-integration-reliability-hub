@@ -237,3 +237,39 @@ test("Keycloak discovery/JWKS tokens establish the persisted viewer tenant conte
     wrongAudience.verifyAccessToken(token.access_token ?? ""),
   ).rejects.toBeInstanceOf(AuthenticationError);
 });
+test("M03 local seed provides two tenant-scoped partner configurations and alias-only credentials", async () => {
+  const seeded: TenantContext = {
+    tenantId: "tenant_01J0A1B2C3D4E5F6G7H8J9K0MN" as never,
+    actorType: "system",
+    actorId: "m03-seed-check",
+    requestId: "m03-seed-check",
+    correlationId: "cor_01J0A1B2C3D4E5F6G7H8J9K0MN" as never,
+  };
+  const alpha = await persistence.getPartner(
+    seeded,
+    "ptr_01J0A1B2C3D4E5F6G7H8J90001" as never,
+  );
+  expect(alpha).toMatchObject({
+    name: "Mock Partner Alpha",
+    externalKey: "mock-alpha",
+  });
+  const destination = await persistence.getDestination(
+    seeded,
+    "dst_01J0A1B2C3D4E5F6G7H8J90010" as never,
+  );
+  expect(JSON.stringify(destination)).not.toContain("credential");
+  const subscriptions = await persistence.listSubscriptions(
+    seeded,
+    "shipment.status_changed",
+  );
+  expect(subscriptions).toHaveLength(2);
+  const secrets = new LocalDynamoDbSecretStore(documentClient, {
+    coreTableName,
+    masterKeyBase64: masterKey,
+  });
+  await expect(
+    secrets.resolve(seeded, { name: "alpha-api-key" }),
+  ).resolves.toMatchObject({
+    value: expect.any(String),
+  });
+});

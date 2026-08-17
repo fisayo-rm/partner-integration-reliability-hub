@@ -47,6 +47,18 @@ export const key = {
     PK: `TENANT#${tenantId}#EVENT_TYPE#${eventType}`,
     SK: `DESTINATION#${destinationId}`,
   }),
+  subscriptionCatalog: (tenantId: TenantId, subscriptionId: string) => ({
+    PK: `TENANT#${tenantId}`,
+    SK: `SUBSCRIPTION#${subscriptionId}`,
+  }),
+  externalKey: (
+    tenantId: TenantId,
+    type: "PARTNER" | "DESTINATION" | "TRANSFORMATION" | "SUBSCRIPTION",
+    externalKey: string,
+  ) => ({
+    PK: `TENANT#${tenantId}#EXTERNAL#${type}`,
+    SK: `KEY#${externalKey}`,
+  }),
   event: (tenantId: TenantId, eventId: string) => ({
     PK: `TENANT#${tenantId}#EVENT#${eventId}`,
     SK: "META",

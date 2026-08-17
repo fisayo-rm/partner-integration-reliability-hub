@@ -28,6 +28,7 @@ import type {
   AtomicWriteSet,
   AuditRepository,
   CoreRepository,
+  ControlPlaneRepository,
   DeliveryConcurrencyRepository,
   EventAcceptanceWriter,
   IdentityRepository,
@@ -85,7 +86,8 @@ export class DynamoPersistence
     TenantRepository,
     NonceRepository,
     EventAcceptanceWriter,
-    DeliveryConcurrencyRepository
+    DeliveryConcurrencyRepository,
+    ControlPlaneRepository
 {
   public constructor(
     private readonly client: DynamoDBDocumentClient,
@@ -173,6 +175,392 @@ export class DynamoPersistence
     return this.getCore<TransformationVersion>(
       key.transformation(context.tenantId, transformationId, version),
     );
+  }
+  public async listPartners(
+    context: TenantContext,
+    input: { readonly limit: number; readonly cursor?: string },
+  ): Promise<{ readonly items: readonly Partner[]; readonly cursor?: string }> {
+    const result = await this.client.send(
+      new QueryCommand({
+        TableName: this.config.coreTableName,
+        KeyConditionExpression: "PK = :pk AND begins_with(SK, :prefix)",
+        ExpressionAttributeValues: {
+          ":pk": `TENANT#${context.tenantId}`,
+          ":prefix": "PARTNER#",
+        },
+        Limit: input.limit,
+        ExclusiveStartKey:
+          input.cursor === undefined ? undefined : JSON.parse(input.cursor),
+      }),
+    );
+    const items = (result.Items ?? [])
+      .filter((value) => !isExpired(value))
+      .map((value) => value as Partner);
+    return result.LastEvaluatedKey === undefined
+      ? { items }
+      : { items, cursor: JSON.stringify(result.LastEvaluatedKey) };
+  }
+  public async listControlSubscriptions(
+    context: TenantContext,
+    input: { readonly limit: number; readonly cursor?: string },
+  ): Promise<{
+    readonly items: readonly Subscription[];
+    readonly cursor?: string;
+  }> {
+    const result = await this.client.send(
+      new QueryCommand({
+        TableName: this.config.coreTableName,
+        KeyConditionExpression: "PK = :pk AND begins_with(SK, :prefix)",
+        ExpressionAttributeValues: {
+          ":pk": `TENANT#${context.tenantId}`,
+          ":prefix": "SUBSCRIPTION#",
+        },
+        Limit: input.limit,
+        ExclusiveStartKey:
+          input.cursor === undefined ? undefined : JSON.parse(input.cursor),
+      }),
+    );
+    const items = (result.Items ?? [])
+      .filter((value) => !isExpired(value))
+      .map((value) => value as Subscription);
+    return result.LastEvaluatedKey === undefined
+      ? { items }
+      : { items, cursor: JSON.stringify(result.LastEvaluatedKey) };
+  }
+  public async listTransformationVersions(
+    context: TenantContext,
+    transformationId: TransformationVersion["transformationId"],
+    input: { readonly limit: number; readonly cursor?: string },
+  ): Promise<{
+    readonly items: readonly TransformationVersion[];
+    readonly cursor?: string;
+  }> {
+    const result = await this.client.send(
+      new QueryCommand({
+        TableName: this.config.coreTableName,
+        KeyConditionExpression: "PK = :pk AND begins_with(SK, :prefix)",
+        ExpressionAttributeValues: {
+          ":pk": `TENANT#${context.tenantId}#TRANSFORMATION#${transformationId}`,
+          ":prefix": "VERSION#",
+        },
+        Limit: input.limit,
+        ExclusiveStartKey:
+          input.cursor === undefined ? undefined : JSON.parse(input.cursor),
+      }),
+    );
+    const items = (result.Items ?? [])
+      .filter((value) => !isExpired(value))
+      .map((value) => value as TransformationVersion);
+    return result.LastEvaluatedKey === undefined
+      ? { items }
+      : { items, cursor: JSON.stringify(result.LastEvaluatedKey) };
+  }
+  private auditPut(event: AuditEvent) {
+    return {
+      Put: {
+        TableName: this.config.auditTableName,
+        Item: itemWithKeys(
+          { ...event, expiresAt: epochSeconds(event.expiresAt) },
+          key.audit(event.tenantId, event.occurredAt, event.auditId),
+          "AUDIT",
+        ),
+        ConditionExpression: "attribute_not_exists(PK)",
+      },
+    };
+  }
+  private async controlWrite(
+    items: readonly unknown[],
+  ): Promise<"ok" | "conflict"> {
+    try {
+      await this.client.send(
+        new TransactWriteCommand({ TransactItems: items as never }),
+      );
+      return "ok";
+    } catch (error) {
+      if (isConditionalFailure(error)) return "conflict";
+      throw error;
+    }
+  }
+  public async createPartner(
+    context: TenantContext,
+    partner: Partner,
+    audit: AuditEvent,
+  ): Promise<"created" | "conflict" | "limit"> {
+    const existing = await this.listPartners(context, { limit: 11 });
+    if (existing.items.length >= 10) return "limit";
+    const result = await this.controlWrite([
+      {
+        Put: {
+          TableName: this.config.coreTableName,
+          Item: itemWithKeys(
+            partner,
+            key.partner(context.tenantId, partner.partnerId),
+            "PARTNER",
+          ),
+          ConditionExpression: "attribute_not_exists(PK)",
+        },
+      },
+      {
+        Put: {
+          TableName: this.config.coreTableName,
+          Item: itemWithKeys(
+            { partnerId: partner.partnerId },
+            key.externalKey(context.tenantId, "PARTNER", partner.externalKey),
+            "EXTERNAL_KEY",
+          ),
+          ConditionExpression: "attribute_not_exists(PK)",
+        },
+      },
+      this.auditPut(audit),
+    ]);
+    return result === "ok" ? "created" : "conflict";
+  }
+  public async updatePartner(
+    context: TenantContext,
+    partner: Partner,
+    expectedVersion: number,
+    audit: AuditEvent,
+  ): Promise<"updated" | "not_found" | "conflict"> {
+    if ((await this.getPartner(context, partner.partnerId)) === undefined)
+      return "not_found";
+    const result = await this.controlWrite([
+      {
+        Put: {
+          TableName: this.config.coreTableName,
+          Item: itemWithKeys(
+            partner,
+            key.partner(context.tenantId, partner.partnerId),
+            "PARTNER",
+          ),
+          ConditionExpression: "#version = :version",
+          ExpressionAttributeNames: { "#version": "version" },
+          ExpressionAttributeValues: { ":version": expectedVersion },
+        },
+      },
+      this.auditPut(audit),
+    ]);
+    return result === "ok" ? "updated" : "conflict";
+  }
+  public async createDestination(
+    context: TenantContext,
+    destination: Destination,
+    audit: AuditEvent,
+  ): Promise<"created" | "conflict" | "limit" | "not_found"> {
+    if ((await this.getPartner(context, destination.partnerId)) === undefined)
+      return "not_found";
+    const existing = await this.client.send(
+      new QueryCommand({
+        TableName: this.config.coreTableName,
+        KeyConditionExpression: "PK = :pk AND begins_with(SK, :prefix)",
+        ExpressionAttributeValues: {
+          ":pk": `TENANT#${context.tenantId}`,
+          ":prefix": "DESTINATION#",
+        },
+        Select: "COUNT",
+      }),
+    );
+    if ((existing.Count ?? 0) >= 25) return "limit";
+    const result = await this.controlWrite([
+      {
+        Put: {
+          TableName: this.config.coreTableName,
+          Item: itemWithKeys(
+            destination,
+            key.destination(context.tenantId, destination.destinationId),
+            "DESTINATION",
+          ),
+          ConditionExpression: "attribute_not_exists(PK)",
+        },
+      },
+      {
+        Put: {
+          TableName: this.config.coreTableName,
+          Item: itemWithKeys(
+            { destinationId: destination.destinationId },
+            key.externalKey(
+              context.tenantId,
+              "DESTINATION",
+              destination.externalKey,
+            ),
+            "EXTERNAL_KEY",
+          ),
+          ConditionExpression: "attribute_not_exists(PK)",
+        },
+      },
+      this.auditPut(audit),
+    ]);
+    return result === "ok" ? "created" : "conflict";
+  }
+  public async updateDestination(
+    context: TenantContext,
+    destination: Destination,
+    expectedVersion: number,
+    audit: AuditEvent,
+  ): Promise<"updated" | "not_found" | "conflict"> {
+    if (
+      (await this.getDestination(context, destination.destinationId)) ===
+      undefined
+    )
+      return "not_found";
+    const result = await this.controlWrite([
+      {
+        Put: {
+          TableName: this.config.coreTableName,
+          Item: itemWithKeys(
+            destination,
+            key.destination(context.tenantId, destination.destinationId),
+            "DESTINATION",
+          ),
+          ConditionExpression: "#version = :version",
+          ExpressionAttributeNames: { "#version": "version" },
+          ExpressionAttributeValues: { ":version": expectedVersion },
+        },
+      },
+      this.auditPut(audit),
+    ]);
+    return result === "ok" ? "updated" : "conflict";
+  }
+  public async createTransformationVersion(
+    context: TenantContext,
+    transformation: TransformationVersion,
+    audit: AuditEvent,
+  ): Promise<"created" | "conflict"> {
+    const items: unknown[] = [
+      {
+        Put: {
+          TableName: this.config.coreTableName,
+          Item: itemWithKeys(
+            transformation,
+            key.transformation(
+              context.tenantId,
+              transformation.transformationId,
+              transformation.version,
+            ),
+            "TRANSFORMATION_VERSION",
+          ),
+          ConditionExpression: "attribute_not_exists(PK)",
+        },
+      },
+      this.auditPut(audit),
+    ];
+    if (transformation.version === 1)
+      items.splice(1, 0, {
+        Put: {
+          TableName: this.config.coreTableName,
+          Item: itemWithKeys(
+            { transformationId: transformation.transformationId },
+            key.externalKey(
+              context.tenantId,
+              "TRANSFORMATION",
+              transformation.externalKey,
+            ),
+            "EXTERNAL_KEY",
+          ),
+          ConditionExpression: "attribute_not_exists(PK)",
+        },
+      });
+    return (await this.controlWrite(items)) === "ok" ? "created" : "conflict";
+  }
+  public async createSubscription(
+    context: TenantContext,
+    subscription: Subscription,
+    audit: AuditEvent,
+  ): Promise<"created" | "conflict" | "not_found"> {
+    if (
+      (await this.getDestination(context, subscription.destinationId)) ===
+      undefined
+    )
+      return "not_found";
+    const result = await this.controlWrite([
+      {
+        Put: {
+          TableName: this.config.coreTableName,
+          Item: itemWithKeys(
+            subscription,
+            key.subscription(
+              context.tenantId,
+              subscription.eventType,
+              subscription.destinationId,
+            ),
+            "SUBSCRIPTION",
+          ),
+          ConditionExpression: "attribute_not_exists(PK)",
+        },
+      },
+      {
+        Put: {
+          TableName: this.config.coreTableName,
+          Item: itemWithKeys(
+            subscription,
+            key.subscriptionCatalog(
+              context.tenantId,
+              subscription.subscriptionId,
+            ),
+            "SUBSCRIPTION_CATALOG",
+          ),
+          ConditionExpression: "attribute_not_exists(PK)",
+        },
+      },
+      {
+        Put: {
+          TableName: this.config.coreTableName,
+          Item: itemWithKeys(
+            { subscriptionId: subscription.subscriptionId },
+            key.externalKey(
+              context.tenantId,
+              "SUBSCRIPTION",
+              subscription.externalKey,
+            ),
+            "EXTERNAL_KEY",
+          ),
+          ConditionExpression: "attribute_not_exists(PK)",
+        },
+      },
+      this.auditPut(audit),
+    ]);
+    return result === "ok" ? "created" : "conflict";
+  }
+  public async deleteSubscription(
+    context: TenantContext,
+    subscriptionId: Subscription["subscriptionId"],
+    audit: AuditEvent,
+  ): Promise<"deleted" | "not_found"> {
+    const subscription = await this.getCore<Subscription>(
+      key.subscriptionCatalog(context.tenantId, subscriptionId),
+    );
+    if (subscription === undefined) return "not_found";
+    const result = await this.controlWrite([
+      {
+        Delete: {
+          TableName: this.config.coreTableName,
+          Key: key.subscription(
+            context.tenantId,
+            subscription.eventType,
+            subscription.destinationId,
+          ),
+          ConditionExpression: "attribute_exists(PK)",
+        },
+      },
+      {
+        Delete: {
+          TableName: this.config.coreTableName,
+          Key: key.subscriptionCatalog(context.tenantId, subscriptionId),
+          ConditionExpression: "attribute_exists(PK)",
+        },
+      },
+      {
+        Delete: {
+          TableName: this.config.coreTableName,
+          Key: key.externalKey(
+            context.tenantId,
+            "SUBSCRIPTION",
+            subscription.externalKey,
+          ),
+        },
+      },
+      this.auditPut(audit),
+    ]);
+    return result === "ok" ? "deleted" : "not_found";
   }
   public async append(event: AuditEvent): Promise<void> {
     await this.client.send(

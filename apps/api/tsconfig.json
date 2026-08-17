@@ -8,6 +8,8 @@
     { "path": "../../packages/auth" },
     { "path": "../../packages/domain" },
     { "path": "../../packages/persistence" },
-    { "path": "../../packages/secrets" }
+    { "path": "../../packages/secrets" },
+    { "path": "../../packages/transformation" },
+    { "path": "../../packages/partner-http" }
   ]
 }

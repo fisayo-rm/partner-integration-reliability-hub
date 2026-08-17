@@ -5,5 +5,9 @@
   "type": "module",
   "scripts": {
     "build": "tsc --build"
+  },
+  "dependencies": {
+    "@pirh/contracts": "workspace:*",
+    "fastify": "5.8.5"
   }
 }

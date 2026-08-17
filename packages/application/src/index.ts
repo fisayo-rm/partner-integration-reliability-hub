@@ -1,18 +1,44 @@
 import type {
+  ApiClient,
   AuditEvent,
   CanonicalEvent,
   ClientId,
   CorrelationId,
   DeliveryExecution,
   Destination,
+  DeliveryAttempt,
+  DeliveryHistoryEntry,
   EventId,
   JsonObject,
   OutboxRecord,
   Partner,
   Subscription,
   TenantContext,
+  Tenant,
   TransformationVersion,
+  UserIdentityMapping,
+  SecretReference,
 } from "@pirh/domain";
+
+export interface IdentityRepository {
+  findVerifiedIdentity(
+    issuer: string,
+    subject: string,
+  ): Promise<UserIdentityMapping | undefined>;
+}
+/** This is intentionally separate from tenant-facing repository APIs. */
+export interface ApiClientRepository {
+  locateClient(
+    clientId: ClientId,
+  ): Promise<{ readonly tenantId: TenantContext["tenantId"] } | undefined>;
+  getClient(
+    context: TenantContext,
+    clientId: ClientId,
+  ): Promise<ApiClient | undefined>;
+}
+export interface TenantRepository {
+  getTenant(context: TenantContext): Promise<Tenant | undefined>;
+}
 
 export interface CoreRepository {
   getEvent(
@@ -58,11 +84,11 @@ export interface OutboxRepository {
     limit: number,
   ): Promise<readonly OutboxRecord[]>;
   markPublished(
-    outboxId: OutboxRecord["outboxId"],
+    outbox: Pick<OutboxRecord, "outboxId" | "createdAt">,
     publishedAt: Date,
   ): Promise<void>;
   recordPublicationFailure(
-    outboxId: OutboxRecord["outboxId"],
+    outbox: Pick<OutboxRecord, "outboxId" | "createdAt">,
     occurredAt: Date,
   ): Promise<void>;
 }
@@ -77,6 +103,46 @@ export interface AtomicWriteSet {
 }
 export interface AtomicWriter {
   commit(context: TenantContext, writeSet: AtomicWriteSet): Promise<void>;
+}
+export interface EventAcceptanceWriter {
+  accept(input: {
+    readonly context: TenantContext;
+    readonly event: CanonicalEvent;
+    readonly requestBodyHash: string;
+    readonly idempotencyKeyHash: string;
+    readonly responseStatus: number;
+    readonly outbox: OutboxRecord;
+  }): Promise<"accepted" | "duplicate" | "conflict">;
+}
+export interface DeliveryConcurrencyRepository {
+  replaceIfVersion(
+    context: TenantContext,
+    delivery: DeliveryExecution,
+    expectedVersion: number,
+  ): Promise<boolean>;
+  appendAttemptAndHistory(
+    context: TenantContext,
+    eventId: EventId,
+    attempt: DeliveryAttempt,
+    history: DeliveryHistoryEntry,
+  ): Promise<void>;
+  acquireLease(input: {
+    readonly context: TenantContext;
+    readonly eventId: EventId;
+    readonly deliveryId: DeliveryExecution["deliveryId"];
+    readonly expectedVersion: number;
+    readonly owner: string;
+    readonly token: string;
+    readonly expiresAt: string;
+  }): Promise<boolean>;
+}
+export interface NonceRepository {
+  putIfAbsent(input: {
+    readonly tenantId: TenantContext["tenantId"];
+    readonly clientId: ClientId;
+    readonly nonceHash: string;
+    readonly expiresAt: Date;
+  }): Promise<boolean>;
 }
 export interface QueuePublisher {
   publish(message: {
@@ -93,15 +159,23 @@ export interface DeliveryScheduler {
   }): Promise<void>;
 }
 export interface SecretStore {
+  store(
+    context: TenantContext,
+    input: {
+      readonly name: string;
+      readonly value: string;
+      readonly version?: string;
+    },
+  ): Promise<SecretReference>;
   resolve(
-    referenceName: string,
+    context: TenantContext,
+    reference: SecretReference,
   ): Promise<{ readonly value: string; readonly version?: string }>;
 }
 export interface IdentityProvider {
   verifyAccessToken(token: string): Promise<{
     readonly issuer: string;
     readonly subject: string;
-    readonly tenantId: TenantContext["tenantId"];
     readonly roles: readonly string[];
   }>;
 }

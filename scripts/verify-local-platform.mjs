@@ -1,6 +1,12 @@
 import { spawn } from "node:child_process";
+import { randomBytes } from "node:crypto";
 
-const project = `pirh-m01-${Date.now()}`;
+const project = `pirh-m02-${Date.now()}`;
+const composeEnvironment = {
+  ...process.env,
+  LOCAL_SECRET_MASTER_KEY_B64: randomBytes(32).toString("base64"),
+  LOCAL_SEED_PRODUCER_SECRET: randomBytes(32).toString("base64url"),
+};
 const base = [
   "compose",
   "--ansi",
@@ -16,6 +22,7 @@ function docker(args) {
   return new Promise((resolve, reject) => {
     const child = spawn("docker", [...base, ...args], {
       stdio: ["ignore", "pipe", "pipe"],
+      env: composeEnvironment,
     });
     let output = "";
     child.stdout.setEncoding("utf8");
@@ -35,6 +42,24 @@ function docker(args) {
               `docker compose ${args.join(" ")} exited ${code}: ${output.slice(-8_000)}`,
             ),
           ),
+    );
+  });
+}
+function pnpm(args) {
+  return new Promise((resolve, reject) => {
+    const child = spawn("pnpm", args, {
+      stdio: "inherit",
+      env: {
+        ...composeEnvironment,
+        DYNAMODB_ENDPOINT: "http://localhost:8000",
+        M02_TEST_MASTER_KEY_B64: composeEnvironment.LOCAL_SECRET_MASTER_KEY_B64,
+      },
+    });
+    child.on("error", reject);
+    child.on("exit", (code) =>
+      code === 0
+        ? resolve()
+        : reject(new Error(`pnpm ${args.join(" ")} exited ${code}`)),
     );
   });
 }
@@ -75,8 +100,9 @@ async function verify(profile) {
     "/bin/sh",
     "bootstrap",
     "-c",
-    "/bootstrap/bootstrap.sh && /bootstrap/assert.sh",
+    "/bin/sh /bootstrap/bootstrap.sh && /bin/sh /bootstrap/assert.sh",
   ]);
+  await pnpm(["test:integration"]);
   if (profile === "observability") {
     for (const [url, label, maxAttempts] of [
       ["http://localhost:13133/", "OpenTelemetry collector"],

@@ -3,7 +3,19 @@
   "version": "0.0.0",
   "private": true,
   "type": "module",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    }
+  },
   "scripts": {
     "build": "tsc --build"
+  },
+  "dependencies": {
+    "@aws-sdk/client-dynamodb": "3.1111.0",
+    "@aws-sdk/lib-dynamodb": "3.1111.0",
+    "@pirh/application": "workspace:*",
+    "@pirh/domain": "workspace:*"
   }
 }

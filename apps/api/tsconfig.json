@@ -2,5 +2,12 @@
   "extends": "../../tsconfig.base.json",
   "compilerOptions": { "composite": true, "rootDir": "src", "outDir": "dist" },
   "include": ["src/**/*.ts"],
-  "references": [{ "path": "../../packages/contracts" }]
+  "references": [
+    { "path": "../../packages/contracts" },
+    { "path": "../../packages/application" },
+    { "path": "../../packages/auth" },
+    { "path": "../../packages/domain" },
+    { "path": "../../packages/persistence" },
+    { "path": "../../packages/secrets" }
+  ]
 }

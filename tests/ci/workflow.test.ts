@@ -2,7 +2,7 @@ import { readFile } from "node:fs/promises";
 import { expect, test } from "vitest";
 import { parse } from "yaml";
 
-test("pull-request workflow runs Stage A and the M01 local platform smoke", async () => {
+test("pull-request workflow runs Stage A and the local platform/integration smoke", async () => {
   const workflow = parse(
     await readFile(
       new URL("../../.github/workflows/pull-request.yml", import.meta.url),

@@ -91,13 +91,30 @@ services:
     volumes: ["./infrastructure/docker/bootstrap:/bootstrap:ro"]
     entrypoint: ["/bin/sh", "/bootstrap/bootstrap.sh"]
 
+  seed:
+    image: pirh-m01-node:local
+    build: *node-build
+    command: ["pnpm", "--filter", "@pirh/api", "seed:local"]
+    restart: on-failure:3
+    depends_on:
+      bootstrap: { condition: service_completed_successfully }
+      keycloak: { condition: service_started }
+    environment:
+      AWS_REGION: us-east-1
+      DYNAMODB_ENDPOINT: http://dynamodb-local:8000
+      CORE_TABLE_NAME: pirh-core-local
+      AUDIT_TABLE_NAME: pirh-audit-local
+      OIDC_ISSUER: http://localhost:8080/realms/pirh-local
+      LOCAL_SECRET_MASTER_KEY_B64: ${LOCAL_SECRET_MASTER_KEY_B64:-}
+      LOCAL_SEED_PRODUCER_SECRET: ${LOCAL_SEED_PRODUCER_SECRET:-}
+
   api:
     image: pirh-m01-node:local
     build: *node-build
     command: ["pnpm", "--filter", "@pirh/api", "start"]
     restart: on-failure:3
     depends_on:
-      bootstrap: { condition: service_completed_successfully }
+      seed: { condition: service_completed_successfully }
     environment:
       APP_ENV: local
       API_HOST: 0.0.0.0

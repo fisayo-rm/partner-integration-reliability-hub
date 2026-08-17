@@ -37,6 +37,39 @@ export interface TenantContext {
   readonly correlationId: CorrelationId;
 }
 
+export interface Tenant {
+  readonly tenantId: TenantId;
+  readonly name: string;
+  readonly status: "active" | "disabled";
+  readonly createdAt: IsoInstant;
+  readonly version: number;
+}
+export interface UserIdentityMapping {
+  readonly issuer: string;
+  readonly subject: string;
+  readonly tenantId: TenantId;
+  readonly status: "active" | "disabled";
+  /** The database mapping is authoritative and cannot be elevated by token claims. */
+  readonly role: ActorRole;
+  readonly userId: string;
+}
+export interface ApiClientSecretVersion {
+  readonly reference: SecretReference;
+  readonly state: "active" | "grace";
+  readonly activatedAt: IsoInstant;
+  readonly graceExpiresAt?: IsoInstant;
+}
+export interface ApiClient {
+  readonly clientId: ClientId;
+  readonly tenantId: TenantId;
+  readonly name: string;
+  readonly status: "active" | "disabled";
+  readonly scopes: readonly string[];
+  readonly secretVersions: readonly ApiClientSecretVersion[];
+  readonly createdAt: IsoInstant;
+  readonly version: number;
+}
+
 export interface SubjectReference {
   readonly type: string;
   readonly id: string;

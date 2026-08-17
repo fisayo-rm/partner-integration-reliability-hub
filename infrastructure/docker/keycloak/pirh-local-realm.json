@@ -14,14 +14,30 @@
       "redirectUris": ["http://localhost:5173/*"],
       "webOrigins": ["http://localhost:5173"],
       "standardFlowEnabled": true,
-      "directAccessGrantsEnabled": true
+      "directAccessGrantsEnabled": true,
+      "protocolMappers": [
+        {
+          "name": "pirh-console audience",
+          "protocol": "openid-connect",
+          "protocolMapper": "oidc-audience-mapper",
+          "config": {
+            "included.client.audience": "pirh-console",
+            "access.token.claim": "true",
+            "id.token.claim": "false"
+          }
+        }
+      ]
     }
   ],
   "users": [
     {
+      "id": "11111111-1111-4111-8111-111111111111",
       "username": "admin@example.test",
       "enabled": true,
       "emailVerified": true,
+      "firstName": "Local",
+      "lastName": "Admin",
+      "requiredActions": [],
       "email": "admin@example.test",
       "realmRoles": ["admin"],
       "credentials": [
@@ -29,9 +45,13 @@
       ]
     },
     {
+      "id": "22222222-2222-4222-8222-222222222222",
       "username": "operator@example.test",
       "enabled": true,
       "emailVerified": true,
+      "firstName": "Local",
+      "lastName": "Operator",
+      "requiredActions": [],
       "email": "operator@example.test",
       "realmRoles": ["operator"],
       "credentials": [
@@ -43,9 +63,13 @@
       ]
     },
     {
+      "id": "33333333-3333-4333-8333-333333333333",
       "username": "viewer@example.test",
       "enabled": true,
       "emailVerified": true,
+      "firstName": "Local",
+      "lastName": "Viewer",
+      "requiredActions": [],
       "email": "viewer@example.test",
       "realmRoles": ["viewer"],
       "credentials": [

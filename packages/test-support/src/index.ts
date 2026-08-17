@@ -23,3 +23,19 @@ export class SequenceIdGenerator {
     return `${prefix}_${ulid}`;
   }
 }
+
+import type { TenantContext } from "@pirh/domain";
+
+/** Reuses one assertion shape for tenant-bound repository and API security tests. */
+export async function expectTenantIsolation<T>(input: {
+  readonly owner: TenantContext;
+  readonly intruder: TenantContext;
+  readonly operation: (context: TenantContext) => Promise<T | undefined>;
+}): Promise<void> {
+  const owner = await input.operation(input.owner);
+  const intruder = await input.operation(input.intruder);
+  if (owner === undefined)
+    throw new Error("The owner context must resolve its own resource.");
+  if (intruder !== undefined)
+    throw new Error("Cross-tenant operation leaked a resource.");
+}

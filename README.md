@@ -35,29 +35,34 @@ pnpm secret:scan
 pnpm audit
 ```
 
-## Local platform (M01)
+## Local platform (M02)
 
 Start Colima before using Docker on macOS:
 
 ```bash
 colima start
-docker compose up --build
+cp .env.example .env.local
+# Replace the two local secret placeholders with random local-only values.
+pnpm local:up
 # or include local telemetry services
-docker compose --profile observability up --build
+pnpm local:up:observability
 ```
 
 The local environment uses disposable Docker volumes, DynamoDB Local, ElasticMQ,
-Keycloak, health-only mock partners, and service placeholders. The M01 smoke suite
-checks both profiles and removes its isolated containers and volumes afterwards:
+Keycloak, health-only mock partners, and service placeholders. It seeds one tenant,
+admin/operator/viewer mappings, and a producer client whose secret is AES-256-GCM
+encrypted in DynamoDB Local. The smoke suite checks both profiles and M02 DynamoDB/
+Keycloak integration behavior, then removes its isolated containers and volumes:
 
 ```bash
 pnpm local:verify
 pnpm local:down
 ```
 
-The Keycloak users in `.env.example` are local-demo-only identities. No business
-event processing, authenticated API behavior, partner delivery, or transformations
-exist yet; they begin in later milestones.
+The Keycloak users in `.env.example` are local-demo-only identities. M02 provides
+authentication hooks and persistence primitives, but no public business endpoint,
+event processing, partner delivery, or transformation execution; those begin in
+later milestones.
 
 ## Repository boundaries
 

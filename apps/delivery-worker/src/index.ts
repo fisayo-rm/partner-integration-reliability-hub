@@ -3,7 +3,11 @@ import { DynamoDBDocumentClient } from "@aws-sdk/lib-dynamodb";
 import { DeliveryService, type OAuthTokenProvider } from "@pirh/application";
 import { SafePartnerHttpClient } from "@pirh/partner-http";
 import { DynamoPersistence } from "@pirh/persistence";
-import { consumeOne, createSqsClient, ElasticMqQueue } from "@pirh/queue";
+import {
+  createSqsClient,
+  ElasticMqQueue,
+  parseQueueMessage,
+} from "@pirh/queue";
 import { LocalDynamoDbSecretStore } from "@pirh/secrets";
 
 const region = process.env.AWS_REGION ?? "us-east-1";
@@ -112,22 +116,70 @@ for (const signal of ["SIGINT", "SIGTERM"] as const)
   });
 while (!stopping) {
   try {
-    await consumeOne(queue, async (message) => {
-      if (message.messageType !== "DELIVER") return;
-      await service.deliver({
-        ...message,
-        owner: process.env.HOSTNAME ?? "delivery-worker",
-      } as never);
-      console.log(
-        JSON.stringify({
-          service: "delivery-worker",
-          event: "delivery.completed",
-          correlationId: message.correlationId,
-          eventId: message.eventId,
-          deliveryId: message.deliveryId,
-        }),
-      );
-    });
+    const messages = await queue.receive(
+      Number(process.env.DELIVERY_WORKER_CONCURRENCY ?? 5),
+      5,
+      Number(process.env.DELIVERY_VISIBILITY_TIMEOUT_SECONDS ?? 360),
+    );
+    const results = await Promise.allSettled(
+      messages.map(async (raw) => {
+        const message = parseQueueMessage(raw);
+        if (message.messageType === "RESUME_DESTINATION")
+          await persistence.resumeDestination({
+            context: {
+              tenantId: message.tenantId as never,
+              actorType: "system",
+              actorId: "delivery-worker",
+              requestId: "resume-destination",
+              correlationId: message.correlationId as never,
+            },
+            destinationId: message.destinationId as never,
+            now: new Date(),
+          });
+        else if (message.messageType === "DELIVER") {
+          const outcome = await service.deliver({
+            ...message,
+            owner: process.env.HOSTNAME ?? "delivery-worker",
+          } as never);
+          if (!outcome.acknowledge) {
+            await queue.defer(raw, outcome.delaySeconds ?? 5);
+            console.log(
+              JSON.stringify({
+                service: "delivery-worker",
+                event: "delivery.deferred",
+                correlationId: message.correlationId,
+                eventId: message.eventId,
+                deliveryId: message.deliveryId,
+                delaySeconds: outcome.delaySeconds ?? 5,
+              }),
+            );
+            return;
+          }
+          console.log(
+            JSON.stringify({
+              service: "delivery-worker",
+              event: "delivery.completed",
+              correlationId: message.correlationId,
+              eventId: message.eventId,
+              deliveryId: message.deliveryId,
+            }),
+          );
+        }
+        await queue.delete(raw);
+      }),
+    );
+    for (const result of results)
+      if (result.status === "rejected")
+        console.error(
+          JSON.stringify({
+            service: "delivery-worker",
+            event: "delivery.failed",
+            error:
+              result.reason instanceof Error
+                ? result.reason.message
+                : "unknown",
+          }),
+        );
   } catch (error) {
     console.error(
       JSON.stringify({

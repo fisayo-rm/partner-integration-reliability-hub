@@ -152,6 +152,12 @@ export interface CircuitRuntimeState {
   readonly probeLeaseExpiresAt?: IsoInstant;
   readonly version: number;
 }
+export interface RateLimitRuntimeState {
+  readonly theoreticalArrivalTimeMs: number;
+  readonly updatedAt: IsoInstant;
+  readonly policyHash: string;
+  readonly version: number;
+}
 export type DestinationAuthType = "api_key" | "oauth_client_credentials";
 export interface SecretReference {
   readonly name: string;
@@ -289,6 +295,8 @@ export interface DeliveryExecution {
   readonly blockedReason?: FailureCategory;
   readonly attemptCount: number;
   readonly maxAttempts: number;
+  /** Present only between durable attempt start and conditional finalization. */
+  readonly activeAttemptId?: AttemptId;
   readonly nextEligibleAt?: IsoInstant;
   readonly leaseOwner?: string;
   readonly leaseToken?: LeaseToken;
@@ -325,6 +333,7 @@ export interface DeliveryAttempt {
   readonly failureCategory?: FailureCategory;
   readonly retryable?: boolean;
   readonly traceId?: string;
+  readonly expiresAt: IsoInstant;
 }
 export interface DeliveryHistoryEntry {
   readonly historyId: string;
@@ -345,6 +354,7 @@ export interface DeliveryHistoryEntry {
   readonly occurredAt: IsoInstant;
   readonly summary: string;
   readonly metadata: JsonObject;
+  readonly expiresAt: IsoInstant;
 }
 export interface AuditEvent {
   readonly auditId: AuditId;
@@ -379,6 +389,20 @@ export interface OutboxRecord {
   readonly createdAt: IsoInstant;
   readonly attempts: number;
   readonly publishedAt?: IsoInstant;
+  readonly schemaVersion: 1;
+}
+export interface ScheduledDeliveryWork {
+  readonly workId: OutboxId;
+  readonly tenantId: TenantId;
+  readonly eventId: EventId;
+  readonly deliveryId: DeliveryId;
+  readonly correlationId: CorrelationId;
+  readonly notBefore: IsoInstant;
+  readonly cause: "RETRY" | "RESUME";
+  readonly createdAt: IsoInstant;
+  readonly publishedAt?: IsoInstant;
+  readonly attempts: number;
+  readonly expiresAt: IsoInstant;
   readonly schemaVersion: 1;
 }
 
@@ -444,6 +468,158 @@ export function deriveEventStatus(counters: EventOutcomeCounters): EventStatus {
     return "succeeded";
   return counters.successfulDeliveries > 0 ? "partially_succeeded" : "failed";
 }
+
+export interface DeliveryResultClassification {
+  readonly success: boolean;
+  readonly retryable: boolean;
+  readonly failureCategory?: FailureCategory;
+  readonly countsTowardCircuit: boolean;
+}
+/** Maps stable HTTP/transport categories to the M05 default policy. */
+export function classifyDeliveryResult(input: {
+  readonly status?: number;
+  readonly errorCode?: string;
+}): DeliveryResultClassification {
+  if (input.status !== undefined) {
+    if (input.status >= 200 && input.status < 300)
+      return { success: true, retryable: false, countsTowardCircuit: false };
+    if ([408, 425, 429, 500, 502, 503, 504].includes(input.status))
+      return {
+        success: false,
+        retryable: true,
+        failureCategory: input.status === 429 ? "RATE_LIMITED" : "PARTNER_5XX",
+        countsTowardCircuit: [500, 502, 503, 504].includes(input.status),
+      };
+    return {
+      success: false,
+      retryable: false,
+      failureCategory: "PARTNER_4XX",
+      countsTowardCircuit: false,
+    };
+  }
+  const code = input.errorCode ?? "UNKNOWN";
+  const classified: Record<string, DeliveryResultClassification> = {
+    DNS_ERROR: {
+      success: false,
+      retryable: true,
+      failureCategory: "DNS_ERROR",
+      countsTowardCircuit: true,
+    },
+    CONNECTION_ERROR: {
+      success: false,
+      retryable: true,
+      failureCategory: "CONNECTION_ERROR",
+      countsTowardCircuit: true,
+    },
+    TLS_ERROR: {
+      success: false,
+      retryable: true,
+      failureCategory: "TLS_ERROR",
+      countsTowardCircuit: true,
+    },
+    TIMEOUT: {
+      success: false,
+      retryable: true,
+      failureCategory: "TIMEOUT",
+      countsTowardCircuit: true,
+    },
+    OAUTH_TOKEN_ERROR: {
+      success: false,
+      retryable: false,
+      failureCategory: "OAUTH_TOKEN_ERROR",
+      countsTowardCircuit: false,
+    },
+    SECRET_NOT_FOUND: {
+      success: false,
+      retryable: false,
+      failureCategory: "SECRET_NOT_FOUND",
+      countsTowardCircuit: false,
+    },
+    INVALID_DESTINATION: {
+      success: false,
+      retryable: false,
+      failureCategory: "INVALID_DESTINATION",
+      countsTowardCircuit: false,
+    },
+    RESPONSE_TOO_LARGE: {
+      success: false,
+      retryable: false,
+      failureCategory: "RESPONSE_TOO_LARGE",
+      countsTowardCircuit: false,
+    },
+    RESPONSE_CONTRACT_ERROR: {
+      success: false,
+      retryable: false,
+      failureCategory: "RESPONSE_CONTRACT_ERROR",
+      countsTowardCircuit: false,
+    },
+  };
+  return (
+    classified[code] ?? {
+      success: false,
+      retryable: false,
+      failureCategory: "UNKNOWN",
+      countsTowardCircuit: false,
+    }
+  );
+}
+
+export function parseRetryAfter(
+  value: string | undefined,
+  now: Date,
+): number | undefined {
+  if (value === undefined) return undefined;
+  const seconds = Number(value);
+  if (Number.isFinite(seconds) && seconds >= 0) return seconds;
+  const at = Date.parse(value);
+  if (!Number.isFinite(at)) return undefined;
+  const result = Math.ceil((at - now.getTime()) / 1_000);
+  return result >= 0 ? result : undefined;
+}
+export function retryDelaySeconds(input: {
+  readonly policy: RetryPolicy;
+  readonly attemptNumber: number;
+  readonly random: number;
+  readonly retryAfterSeconds?: number;
+}): number {
+  const base = Math.min(
+    input.policy.maxDelaySeconds,
+    input.policy.initialDelaySeconds *
+      input.policy.multiplier ** (input.attemptNumber - 1),
+  );
+  const jittered =
+    base * (0.5 + Math.max(0, Math.min(0.999999, input.random)) * 0.5);
+  return Math.min(
+    input.policy.maxDelaySeconds,
+    Math.max(jittered, input.retryAfterSeconds ?? 0),
+  );
+}
+
+export function rateLimitDecision(input: {
+  readonly state?: RateLimitRuntimeState;
+  readonly policy: RateLimitPolicy;
+  readonly nowMs: number;
+}): {
+  readonly permitted: boolean;
+  readonly nextEligibleAtMs: number;
+  readonly nextTheoreticalArrivalTimeMs?: number;
+} {
+  const increment =
+    (input.policy.intervalSeconds * 1_000) /
+    (input.policy.requestsPerInterval * input.policy.safetyFactor);
+  const tat = input.state?.theoreticalArrivalTimeMs ?? input.nowMs;
+  const earliest =
+    tat - increment * Math.max(0, input.policy.burstCapacity - 1);
+  if (input.nowMs < earliest)
+    return { permitted: false, nextEligibleAtMs: Math.ceil(earliest) };
+  return {
+    permitted: true,
+    nextEligibleAtMs: input.nowMs,
+    nextTheoreticalArrivalTimeMs: Math.ceil(
+      Math.max(input.nowMs, tat) + increment,
+    ),
+  };
+}
 export interface DeliveryTransition {
   readonly to: DeliveryState;
   readonly at: IsoInstant;
@@ -464,6 +640,8 @@ const permittedTransitions: Readonly<
   scheduled: ["scheduled", "in_progress", "rate_limited"],
   rate_limited: ["scheduled"],
   in_progress: [
+    "scheduled",
+    "rate_limited",
     "succeeded",
     "retry_scheduled",
     "failed_terminal",
@@ -528,6 +706,9 @@ export function transitionDelivery(
     ...(transition.blockedReason === undefined
       ? {}
       : { blockedReason: transition.blockedReason }),
+    ...(transition.blockedReason === undefined
+      ? {}
+      : { lastFailureCategory: transition.blockedReason }),
     ...(transition.nextEligibleAt === undefined
       ? {}
       : { nextEligibleAt: transition.nextEligibleAt }),

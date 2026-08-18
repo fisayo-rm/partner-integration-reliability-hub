@@ -128,6 +128,10 @@ export const key = {
     PK: `OUTBOX#${shard}`,
     SK: `${createdAt}#${outboxId}`,
   }),
+  scheduledWork: (shard: number, notBefore: string, workId: string) => ({
+    PK: `SCHEDULED_WORK#${shard}`,
+    SK: `${notBefore}#${workId}`,
+  }),
   audit: (tenantId: TenantId, occurredAt: string, auditId: string) => ({
     PK: `TENANT#${tenantId}`,
     SK: `${occurredAt}#AUDIT#${auditId}`,

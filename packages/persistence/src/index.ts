@@ -13,6 +13,9 @@ import type {
   DeliveryAttempt,
   DeliveryExecution,
   DeliveryHistoryEntry,
+  CircuitRuntimeState,
+  RateLimitRuntimeState,
+  ScheduledDeliveryWork,
   Destination,
   EventId,
   OutboxRecord,
@@ -37,7 +40,12 @@ import type {
   RoutingRepository,
   TenantRepository,
 } from "@pirh/application";
-import { deriveEventStatus, isTerminalDeliveryState } from "@pirh/domain";
+import {
+  deriveEventStatus,
+  isTerminalDeliveryState,
+  rateLimitDecision,
+  transitionDelivery,
+} from "@pirh/domain";
 import { key, stableShard } from "./keys.js";
 
 export { key, stableShard } from "./keys.js";
@@ -90,6 +98,9 @@ function deliveryIndexItem(
       destinationId: delivery.destinationId,
       partnerId: delivery.partnerId,
       state: delivery.state,
+      ...(delivery.blockedReason === undefined
+        ? {}
+        : { blockedReason: delivery.blockedReason }),
       updatedAt: delivery.updatedAt,
       expiresAt: epochSeconds(delivery.expiresAt),
     },
@@ -434,13 +445,14 @@ export class DynamoPersistence
     destination: Destination,
     expectedVersion: number,
     audit: AuditEvent,
+    outbox?: OutboxRecord,
   ): Promise<"updated" | "not_found" | "conflict"> {
     if (
       (await this.getDestination(context, destination.destinationId)) ===
       undefined
     )
       return "not_found";
-    const result = await this.controlWrite([
+    const records: unknown[] = [
       {
         Put: {
           TableName: this.config.coreTableName,
@@ -455,7 +467,29 @@ export class DynamoPersistence
         },
       },
       this.auditPut(audit),
-    ]);
+    ];
+    if (outbox !== undefined) {
+      const shard = stableShard(outbox.outboxId, this.config.outboxShardCount);
+      records.push({
+        Put: {
+          TableName: this.config.coreTableName,
+          Item: itemWithKeys(
+            {
+              ...outbox,
+              expiresAt: epochSeconds(
+                new Date(new Date(outbox.createdAt).getTime() + 7 * 86_400_000),
+              ),
+              GSI1PK: `OUTBOX#UNPUBLISHED#${shard}`,
+              GSI1SK: `${outbox.createdAt}#${outbox.outboxId}`,
+            },
+            key.outbox(shard, outbox.createdAt, outbox.outboxId),
+            "OUTBOX",
+          ),
+          ConditionExpression: "attribute_not_exists(PK)",
+        },
+      });
+    }
+    const result = await this.controlWrite(records);
     return result === "ok" ? "updated" : "conflict";
   }
   public async createTransformationVersion(
@@ -684,6 +718,98 @@ export class DynamoPersistence
         ExpressionAttributeValues: {
           ":one": 1,
           ":at": occurredAt.toISOString(),
+        },
+      }),
+    );
+  }
+  public async materializeScheduledWork(record: OutboxRecord): Promise<void> {
+    const payload = record.payload as Record<string, unknown>;
+    if (
+      typeof payload.eventId !== "string" ||
+      typeof payload.deliveryId !== "string" ||
+      typeof payload.correlationId !== "string" ||
+      typeof payload.notBefore !== "string" ||
+      (payload.cause !== "RETRY" && payload.cause !== "RESUME")
+    )
+      throw new Error("INVALID_SCHEDULE_OUTBOX");
+    const shard = stableShard(record.outboxId, this.config.outboxShardCount);
+    const work: ScheduledDeliveryWork = {
+      workId: record.outboxId,
+      tenantId: record.tenantId,
+      eventId: payload.eventId as never,
+      deliveryId: payload.deliveryId as never,
+      correlationId: payload.correlationId as never,
+      notBefore: payload.notBefore as never,
+      cause: payload.cause,
+      createdAt: record.createdAt,
+      attempts: 0,
+      expiresAt: new Date(
+        new Date(record.createdAt).getTime() + 7 * 86_400_000,
+      ).toISOString() as never,
+      schemaVersion: 1,
+    };
+    await this.client.send(
+      new TransactWriteCommand({
+        TransactItems: [
+          {
+            Put: {
+              TableName: this.config.coreTableName,
+              Item: itemWithKeys(
+                { ...work, expiresAt: epochSeconds(work.expiresAt) },
+                key.scheduledWork(shard, work.notBefore, work.workId),
+                "SCHEDULED_WORK",
+              ),
+              ConditionExpression: "attribute_not_exists(PK)",
+            },
+          },
+          {
+            Update: {
+              TableName: this.config.coreTableName,
+              Key: key.outbox(shard, record.createdAt, record.outboxId),
+              UpdateExpression:
+                "SET publishedAt = :published REMOVE GSI1PK, GSI1SK",
+              ExpressionAttributeValues: {
+                ":published": new Date().toISOString(),
+              },
+            },
+          },
+        ],
+      }),
+    );
+  }
+  public async getDueScheduledWork(
+    shard: number,
+    now: Date,
+    limit: number,
+  ): Promise<readonly ScheduledDeliveryWork[]> {
+    const result = await this.client.send(
+      new QueryCommand({
+        TableName: this.config.coreTableName,
+        KeyConditionExpression: "PK = :pk AND SK < :before",
+        ExpressionAttributeValues: {
+          ":pk": `SCHEDULED_WORK#${shard}`,
+          ":before": `${now.toISOString()}#~`,
+        },
+        Limit: limit,
+      }),
+    );
+    return (result.Items ?? [])
+      .filter((value) => !isExpired(value) && value.publishedAt === undefined)
+      .map((value) => value as ScheduledDeliveryWork);
+  }
+  public async markScheduledWorkPublished(
+    work: Pick<ScheduledDeliveryWork, "workId" | "notBefore">,
+    publishedAt: Date,
+  ): Promise<void> {
+    const shard = stableShard(work.workId, this.config.outboxShardCount);
+    await this.client.send(
+      new UpdateCommand({
+        TableName: this.config.coreTableName,
+        Key: key.scheduledWork(shard, work.notBefore, work.workId),
+        UpdateExpression: "SET publishedAt = :published ADD attempts :one",
+        ExpressionAttributeValues: {
+          ":published": publishedAt.toISOString(),
+          ":one": 1,
         },
       }),
     );
@@ -1262,7 +1388,7 @@ export class DynamoPersistence
           UpdateExpression:
             "SET leaseOwner = :owner, leaseToken = :token, leaseAcquiredAt = :now, leaseExpiresAt = :expires, #state = :inProgress, #version = #version + :one",
           ConditionExpression:
-            "#version = :expected AND (#state = :scheduled OR (#state = :inProgress AND leaseExpiresAt < :now))",
+            "#version = :expected AND ((#state = :scheduled OR #state = :retry OR #state = :rate) AND (attribute_not_exists(nextEligibleAt) OR nextEligibleAt <= :now))",
           ExpressionAttributeNames: {
             "#version": "version",
             "#state": "state",
@@ -1274,6 +1400,8 @@ export class DynamoPersistence
             ":expected": input.expectedVersion,
             ":now": new Date().toISOString(),
             ":scheduled": "scheduled",
+            ":retry": "retry_scheduled",
+            ":rate": "rate_limited",
             ":inProgress": "in_progress",
             ":one": 1,
           },
@@ -1444,6 +1572,709 @@ export class DynamoPersistence
       }
     }
     return false;
+  }
+  public async startAttempt(
+    input: Parameters<DeliveryConcurrencyRepository["startAttempt"]>[0],
+  ): Promise<DeliveryExecution | undefined> {
+    const started: DeliveryExecution = {
+      ...input.delivery,
+      attemptCount: input.attempt.attemptNumber,
+      activeAttemptId: input.attempt.attemptId,
+      version: input.delivery.version + 1,
+      updatedAt: input.attempt.startedAt,
+    };
+    try {
+      await this.client.send(
+        new TransactWriteCommand({
+          TransactItems: [
+            {
+              Put: {
+                TableName: this.config.coreTableName,
+                Item: itemWithKeys(
+                  { ...started, expiresAt: epochSeconds(started.expiresAt) },
+                  key.delivery(
+                    input.context.tenantId,
+                    input.eventId,
+                    started.deliveryId,
+                  ),
+                  "DELIVERY",
+                ),
+                ConditionExpression:
+                  "#version = :version AND leaseToken = :lease AND attribute_not_exists(activeAttemptId)",
+                ExpressionAttributeNames: { "#version": "version" },
+                ExpressionAttributeValues: {
+                  ":version": input.expectedVersion,
+                  ":lease": input.delivery.leaseToken,
+                },
+              },
+            },
+            {
+              Put: {
+                TableName: this.config.coreTableName,
+                Item: itemWithKeys(
+                  {
+                    ...input.attempt,
+                    expiresAt: epochSeconds(input.attempt.expiresAt),
+                  },
+                  key.attempt(
+                    input.context.tenantId,
+                    input.eventId,
+                    input.attempt.deliveryId,
+                    input.attempt.attemptNumber,
+                  ),
+                  "DELIVERY_ATTEMPT",
+                ),
+                ConditionExpression: "attribute_not_exists(PK)",
+              },
+            },
+          ],
+        }),
+      );
+      return started;
+    } catch (error) {
+      if (isConditionalFailure(error)) return undefined;
+      throw error;
+    }
+  }
+  public async finalizeAttempt(
+    input: Parameters<DeliveryConcurrencyRepository["finalizeAttempt"]>[0],
+  ): Promise<boolean> {
+    for (let retry = 0; retry < 8; retry += 1) {
+      const current = await this.getCore<DeliveryExecution>(
+        key.delivery(
+          input.context.tenantId,
+          input.eventId,
+          input.delivery.deliveryId,
+        ),
+      );
+      const event = await this.getEvent(input.context, input.eventId);
+      if (current === undefined || event === undefined) return false;
+      const terminal = isTerminalDeliveryState(input.delivery.state);
+      const outcome = terminal
+        ? {
+            ...event.outcome,
+            terminalDeliveries: event.outcome.terminalDeliveries + 1,
+            successfulDeliveries:
+              event.outcome.successfulDeliveries +
+              (input.delivery.state === "succeeded" ? 1 : 0),
+            failedTerminalDeliveries:
+              event.outcome.failedTerminalDeliveries +
+              (input.delivery.state === "failed_terminal" ? 1 : 0),
+            deadLetteredDeliveries:
+              event.outcome.deadLetteredDeliveries +
+              (input.delivery.state === "dead_lettered" ? 1 : 0),
+          }
+        : event.outcome;
+      const updatedEvent: CanonicalEvent = terminal
+        ? {
+            ...event,
+            outcome,
+            status: deriveEventStatus(outcome),
+            version: event.version + 1,
+          }
+        : event;
+      const finalDelivery = { ...input.delivery } as Record<string, unknown>;
+      delete finalDelivery.activeAttemptId;
+      const transaction: unknown[] = [
+        {
+          Put: {
+            TableName: this.config.coreTableName,
+            Item: itemWithKeys(
+              {
+                ...finalDelivery,
+                expiresAt: epochSeconds(input.delivery.expiresAt),
+              },
+              key.delivery(
+                input.context.tenantId,
+                input.eventId,
+                input.delivery.deliveryId,
+              ),
+              "DELIVERY",
+            ),
+            ConditionExpression:
+              "#version = :version AND leaseToken = :lease AND activeAttemptId = :attempt",
+            ExpressionAttributeNames: { "#version": "version" },
+            ExpressionAttributeValues: {
+              ":version": input.expectedVersion,
+              ":lease": input.leaseToken,
+              ":attempt": input.attempt.attemptId,
+            },
+          },
+        },
+        {
+          Put: {
+            TableName: this.config.coreTableName,
+            Item: itemWithKeys(
+              {
+                ...input.attempt,
+                expiresAt: epochSeconds(input.attempt.expiresAt),
+              },
+              key.attempt(
+                input.context.tenantId,
+                input.eventId,
+                input.attempt.deliveryId,
+                input.attempt.attemptNumber,
+              ),
+              "DELIVERY_ATTEMPT",
+            ),
+            ConditionExpression: "#outcome = :started",
+            ExpressionAttributeNames: { "#outcome": "outcome" },
+            ExpressionAttributeValues: { ":started": "started" },
+          },
+        },
+        {
+          Put: {
+            TableName: this.config.coreTableName,
+            Item: itemWithKeys(
+              {
+                ...input.history,
+                expiresAt: epochSeconds(input.history.expiresAt),
+              },
+              key.history(
+                input.context.tenantId,
+                input.eventId,
+                input.history.deliveryId,
+                input.history.occurredAt,
+                input.history.historyId,
+              ),
+              "DELIVERY_HISTORY",
+            ),
+            ConditionExpression: "attribute_not_exists(PK)",
+          },
+        },
+        ...deliveryIndexCategories(current).map((category) => ({
+          Delete: {
+            TableName: this.config.coreTableName,
+            Key: key.deliveryIndex(
+              current.tenantId,
+              category,
+              current.updatedAt,
+              current.deliveryId,
+            ),
+          },
+        })),
+        ...deliveryIndexCategories(input.delivery).map((category) => ({
+          Put: {
+            TableName: this.config.coreTableName,
+            Item: deliveryIndexItem(input.delivery, category),
+          },
+        })),
+      ];
+      if (terminal) {
+        transaction.push({
+          Put: {
+            TableName: this.config.coreTableName,
+            Item: itemWithKeys(
+              {
+                ...updatedEvent,
+                expiresAt: epochSeconds(updatedEvent.expiresAt),
+              },
+              key.event(input.context.tenantId, input.eventId),
+              "EVENT",
+            ),
+            ConditionExpression: "#version = :version",
+            ExpressionAttributeNames: { "#version": "version" },
+            ExpressionAttributeValues: { ":version": event.version },
+          },
+        });
+      }
+      if (input.outbox !== undefined) {
+        const shard = stableShard(
+          input.outbox.outboxId,
+          this.config.outboxShardCount,
+        );
+        transaction.push({
+          Put: {
+            TableName: this.config.coreTableName,
+            Item: itemWithKeys(
+              {
+                ...input.outbox,
+                expiresAt: epochSeconds(
+                  new Date(
+                    new Date(input.outbox.createdAt).getTime() + 7 * 86_400_000,
+                  ),
+                ),
+                GSI1PK: `OUTBOX#UNPUBLISHED#${shard}`,
+                GSI1SK: `${input.outbox.createdAt}#${input.outbox.outboxId}`,
+              },
+              key.outbox(shard, input.outbox.createdAt, input.outbox.outboxId),
+              "OUTBOX",
+            ),
+            ConditionExpression: "attribute_not_exists(PK)",
+          },
+        });
+      }
+      if (input.circuit !== undefined) {
+        transaction.push({
+          Put: {
+            TableName: this.config.coreTableName,
+            Item: itemWithKeys(
+              input.circuit,
+              key.runtime(
+                input.context.tenantId,
+                input.delivery.destinationId,
+                "CIRCUIT",
+              ),
+              "CIRCUIT_RUNTIME",
+            ),
+            ConditionExpression:
+              "attribute_not_exists(PK) OR #version = :version",
+            ExpressionAttributeNames: { "#version": "version" },
+            ExpressionAttributeValues: {
+              ":version": Math.max(0, input.circuit.version - 1),
+            },
+          },
+        });
+      }
+      try {
+        await this.client.send(
+          new TransactWriteCommand({ TransactItems: transaction as never }),
+        );
+        return true;
+      } catch (error) {
+        if (!isConditionalFailure(error)) throw error;
+      }
+    }
+    return false;
+  }
+  public async defer(
+    input: Parameters<DeliveryConcurrencyRepository["defer"]>[0],
+  ): Promise<boolean> {
+    const shard = stableShard(
+      input.outbox.outboxId,
+      this.config.outboxShardCount,
+    );
+    try {
+      await this.client.send(
+        new TransactWriteCommand({
+          TransactItems: [
+            {
+              Put: {
+                TableName: this.config.coreTableName,
+                Item: itemWithKeys(
+                  {
+                    ...input.delivery,
+                    expiresAt: epochSeconds(input.delivery.expiresAt),
+                  },
+                  key.delivery(
+                    input.context.tenantId,
+                    input.eventId,
+                    input.delivery.deliveryId,
+                  ),
+                  "DELIVERY",
+                ),
+                ConditionExpression:
+                  "#version = :version AND leaseToken = :lease",
+                ExpressionAttributeNames: { "#version": "version" },
+                ExpressionAttributeValues: {
+                  ":version": input.expectedVersion,
+                  ":lease": input.leaseToken,
+                },
+              },
+            },
+            {
+              Put: {
+                TableName: this.config.coreTableName,
+                Item: itemWithKeys(
+                  {
+                    ...input.history,
+                    expiresAt: epochSeconds(input.history.expiresAt),
+                  },
+                  key.history(
+                    input.context.tenantId,
+                    input.eventId,
+                    input.history.deliveryId,
+                    input.history.occurredAt,
+                    input.history.historyId,
+                  ),
+                  "DELIVERY_HISTORY",
+                ),
+                ConditionExpression: "attribute_not_exists(PK)",
+              },
+            },
+            ...deliveryIndexCategories(input.delivery).map((category) => ({
+              Put: {
+                TableName: this.config.coreTableName,
+                Item: deliveryIndexItem(input.delivery, category),
+              },
+            })),
+            {
+              Put: {
+                TableName: this.config.coreTableName,
+                Item: itemWithKeys(
+                  {
+                    ...input.outbox,
+                    expiresAt: epochSeconds(
+                      new Date(
+                        new Date(input.outbox.createdAt).getTime() +
+                          7 * 86_400_000,
+                      ),
+                    ),
+                    GSI1PK: `OUTBOX#UNPUBLISHED#${shard}`,
+                    GSI1SK: `${input.outbox.createdAt}#${input.outbox.outboxId}`,
+                  },
+                  key.outbox(
+                    shard,
+                    input.outbox.createdAt,
+                    input.outbox.outboxId,
+                  ),
+                  "OUTBOX",
+                ),
+                ConditionExpression: "attribute_not_exists(PK)",
+              },
+            },
+          ] as never,
+        }),
+      );
+      return true;
+    } catch (error) {
+      if (isConditionalFailure(error)) return false;
+      throw error;
+    }
+  }
+  public async acquireRatePermit(
+    input: Parameters<DeliveryConcurrencyRepository["acquireRatePermit"]>[0],
+  ): Promise<{ readonly permitted: boolean; readonly nextEligibleAt: Date }> {
+    for (let attempt = 0; attempt < 8; attempt += 1) {
+      const current = await this.getCore<RateLimitRuntimeState>(
+        key.runtime(input.context.tenantId, input.destinationId, "RATE_LIMIT"),
+      );
+      const decision = rateLimitDecision({
+        ...(current === undefined ? {} : { state: current }),
+        policy: input.policy,
+        nowMs: input.now.getTime(),
+      });
+      if (!decision.permitted)
+        return {
+          permitted: false,
+          nextEligibleAt: new Date(decision.nextEligibleAtMs),
+        };
+      const next: RateLimitRuntimeState = {
+        theoreticalArrivalTimeMs:
+          decision.nextTheoreticalArrivalTimeMs ?? input.now.getTime(),
+        updatedAt: input.now.toISOString() as never,
+        policyHash: JSON.stringify(input.policy),
+        version: (current?.version ?? 0) + 1,
+      };
+      try {
+        await this.client.send(
+          new PutCommand({
+            TableName: this.config.coreTableName,
+            Item: itemWithKeys(
+              next,
+              key.runtime(
+                input.context.tenantId,
+                input.destinationId,
+                "RATE_LIMIT",
+              ),
+              "RATE_LIMIT_RUNTIME",
+            ),
+            ConditionExpression:
+              "attribute_not_exists(PK) OR #version = :version",
+            ExpressionAttributeNames: { "#version": "version" },
+            ExpressionAttributeValues: { ":version": current?.version ?? 0 },
+          }),
+        );
+        return { permitted: true, nextEligibleAt: input.now };
+      } catch (error) {
+        if (!isConditionalFailure(error)) throw error;
+      }
+    }
+    return {
+      permitted: false,
+      nextEligibleAt: new Date(input.now.getTime() + 5_000),
+    };
+  }
+  public async acquireCircuitPermit(
+    input: Parameters<DeliveryConcurrencyRepository["acquireCircuitPermit"]>[0],
+  ): Promise<{
+    readonly allowed: boolean;
+    readonly probe: boolean;
+    readonly nextEligibleAt?: Date;
+    readonly state: CircuitRuntimeState;
+  }> {
+    for (let attempt = 0; attempt < 8; attempt += 1) {
+      const current = (await this.getCore<CircuitRuntimeState>(
+        key.runtime(input.context.tenantId, input.destinationId, "CIRCUIT"),
+      )) ?? { state: "CLOSED" as const, consecutiveFailures: 0, version: 0 };
+      if (current.state === "CLOSED")
+        return { allowed: true, probe: false, state: current };
+      const expiration =
+        current.probeLeaseExpiresAt === undefined
+          ? undefined
+          : new Date(current.probeLeaseExpiresAt);
+      const nextProbe =
+        current.nextProbeAt === undefined
+          ? input.now
+          : new Date(current.nextProbeAt);
+      if (current.state === "OPEN" && nextProbe.getTime() > input.now.getTime())
+        return {
+          allowed: false,
+          probe: false,
+          nextEligibleAt: nextProbe,
+          state: current,
+        };
+      if (
+        current.state === "HALF_OPEN" &&
+        expiration !== undefined &&
+        expiration.getTime() > input.now.getTime()
+      )
+        return {
+          allowed: false,
+          probe: false,
+          nextEligibleAt: expiration,
+          state: current,
+        };
+      const probe: CircuitRuntimeState = {
+        ...current,
+        state: "HALF_OPEN",
+        probeLeaseOwner: input.owner,
+        probeLeaseExpiresAt: new Date(
+          input.now.getTime() + input.policy.probeLeaseSeconds * 1_000,
+        ).toISOString() as never,
+        version: current.version + 1,
+      };
+      try {
+        await this.client.send(
+          new PutCommand({
+            TableName: this.config.coreTableName,
+            Item: itemWithKeys(
+              probe,
+              key.runtime(
+                input.context.tenantId,
+                input.destinationId,
+                "CIRCUIT",
+              ),
+              "CIRCUIT_RUNTIME",
+            ),
+            ConditionExpression:
+              "attribute_not_exists(PK) OR #version = :version",
+            ExpressionAttributeNames: { "#version": "version" },
+            ExpressionAttributeValues: { ":version": current.version },
+          }),
+        );
+        return { allowed: true, probe: true, state: probe };
+      } catch (error) {
+        if (!isConditionalFailure(error)) throw error;
+      }
+    }
+    const state: CircuitRuntimeState = {
+      state: "OPEN",
+      consecutiveFailures: 0,
+      nextProbeAt: new Date(input.now.getTime() + 5_000).toISOString() as never,
+      version: 0,
+    };
+    return {
+      allowed: false,
+      probe: false,
+      nextEligibleAt: new Date(input.now.getTime() + 5_000),
+      state,
+    };
+  }
+  public circuitAfterAttempt(
+    input: Parameters<DeliveryConcurrencyRepository["circuitAfterAttempt"]>[0],
+  ): CircuitRuntimeState {
+    const version = input.current.version + 1;
+    if (input.success)
+      return { state: "CLOSED", consecutiveFailures: 0, version };
+    if (!input.countsTowardCircuit) return { ...input.current, version };
+    const failures = input.current.consecutiveFailures + 1;
+    if (input.probe || failures >= input.policy.failureThreshold)
+      return {
+        state: "OPEN",
+        consecutiveFailures: failures,
+        openedAt: input.now.toISOString() as never,
+        nextProbeAt: new Date(
+          input.now.getTime() + input.policy.cooldownSeconds * 1_000,
+        ).toISOString() as never,
+        version,
+      };
+    return { state: "CLOSED", consecutiveFailures: failures, version };
+  }
+  public async recoverExpired(
+    input: Parameters<DeliveryConcurrencyRepository["recoverExpired"]>[0],
+  ): Promise<boolean> {
+    const delivery = await this.getDelivery(input.context, input.deliveryId);
+    if (
+      delivery === undefined ||
+      delivery.state !== "in_progress" ||
+      delivery.leaseExpiresAt === undefined ||
+      new Date(delivery.leaseExpiresAt).getTime() > input.now.getTime()
+    )
+      return false;
+    const next = transitionDelivery(delivery, {
+      to: "scheduled",
+      at: input.now.toISOString() as never,
+      expectedVersion: delivery.version,
+      leaseToken: delivery.leaseToken ?? ("expired-lease" as never),
+      nextEligibleAt: input.now.toISOString() as never,
+    });
+    const history: DeliveryHistoryEntry = {
+      historyId: `recovery-${delivery.deliveryId}-${delivery.version}`,
+      deliveryId: delivery.deliveryId,
+      tenantId: delivery.tenantId,
+      correlationId: delivery.correlationId,
+      type: "lease_recovered",
+      occurredAt: input.now.toISOString() as never,
+      summary: "Expired delivery lease recovered.",
+      metadata: {},
+      expiresAt: delivery.expiresAt,
+    };
+    const outbox: OutboxRecord = {
+      outboxId:
+        `obx_recovery_${delivery.deliveryId}_${delivery.version}` as never,
+      kind: "SCHEDULE_DELIVERY",
+      tenantId: delivery.tenantId,
+      aggregateType: "DELIVERY",
+      aggregateId: delivery.deliveryId,
+      target: "SCHEDULER",
+      payload: {
+        eventId: delivery.eventId,
+        deliveryId: delivery.deliveryId,
+        correlationId: delivery.correlationId,
+        notBefore: input.now.toISOString(),
+        cause: "RESUME",
+      },
+      createdAt: input.now.toISOString() as never,
+      attempts: 0,
+      schemaVersion: 1,
+    };
+    return this.defer({
+      context: input.context,
+      eventId: delivery.eventId,
+      delivery: next,
+      expectedVersion: delivery.version,
+      leaseToken: delivery.leaseToken ?? "",
+      history,
+      outbox,
+    });
+  }
+  public async resumeDestination(
+    input: Parameters<DeliveryConcurrencyRepository["resumeDestination"]>[0],
+  ): Promise<number> {
+    const index = await this.client.send(
+      new QueryCommand({
+        TableName: this.config.coreTableName,
+        KeyConditionExpression: "PK = :pk",
+        ExpressionAttributeValues: {
+          ":pk": `TENANT#${input.context.tenantId}#DELIVERY_INDEX#DESTINATION#${input.destinationId}`,
+        },
+        Limit: 100,
+      }),
+    );
+    const ids = new Set(
+      (index.Items ?? [])
+        .filter((entry) => !isExpired(entry))
+        .map((entry) => entry.deliveryId)
+        .filter((value): value is string => typeof value === "string"),
+    );
+    let resumed = 0;
+    for (const deliveryId of ids) {
+      const current = await this.getDelivery(
+        input.context,
+        deliveryId as never,
+      );
+      if (
+        current === undefined ||
+        current.destinationId !== input.destinationId ||
+        current.blockedReason !== "DESTINATION_DISABLED" ||
+        isTerminalDeliveryState(current.state)
+      )
+        continue;
+      const delivery = transitionDelivery(current, {
+        to: "scheduled",
+        at: input.now.toISOString() as never,
+        expectedVersion: current.version,
+        nextEligibleAt: input.now.toISOString() as never,
+      });
+      const outbox: OutboxRecord = {
+        outboxId:
+          `obx_resume_${current.deliveryId}_${current.version}` as never,
+        kind: "RESUME_DELIVERY",
+        tenantId: current.tenantId,
+        aggregateType: "DELIVERY",
+        aggregateId: current.deliveryId,
+        target: "DELIVERY_QUEUE",
+        payload: {
+          eventId: current.eventId,
+          deliveryId: current.deliveryId,
+          correlationId: current.correlationId,
+          cause: "RESUME",
+          notBefore: input.now.toISOString(),
+        },
+        createdAt: input.now.toISOString() as never,
+        attempts: 0,
+        schemaVersion: 1,
+      };
+      const shard = stableShard(outbox.outboxId, this.config.outboxShardCount);
+      try {
+        await this.client.send(
+          new TransactWriteCommand({
+            TransactItems: [
+              {
+                Put: {
+                  TableName: this.config.coreTableName,
+                  Item: itemWithKeys(
+                    {
+                      ...delivery,
+                      expiresAt: epochSeconds(delivery.expiresAt),
+                    },
+                    key.delivery(
+                      current.tenantId,
+                      current.eventId,
+                      current.deliveryId,
+                    ),
+                    "DELIVERY",
+                  ),
+                  ConditionExpression: "#version = :version",
+                  ExpressionAttributeNames: { "#version": "version" },
+                  ExpressionAttributeValues: { ":version": current.version },
+                },
+              },
+              ...deliveryIndexCategories(current).map((category) => ({
+                Delete: {
+                  TableName: this.config.coreTableName,
+                  Key: key.deliveryIndex(
+                    current.tenantId,
+                    category,
+                    current.updatedAt,
+                    current.deliveryId,
+                  ),
+                },
+              })),
+              ...deliveryIndexCategories(delivery).map((category) => ({
+                Put: {
+                  TableName: this.config.coreTableName,
+                  Item: deliveryIndexItem(delivery, category),
+                },
+              })),
+              {
+                Put: {
+                  TableName: this.config.coreTableName,
+                  Item: itemWithKeys(
+                    {
+                      ...outbox,
+                      expiresAt: epochSeconds(
+                        new Date(input.now.getTime() + 7 * 86_400_000),
+                      ),
+                      GSI1PK: `OUTBOX#UNPUBLISHED#${shard}`,
+                      GSI1SK: `${outbox.createdAt}#${outbox.outboxId}`,
+                    },
+                    key.outbox(shard, outbox.createdAt, outbox.outboxId),
+                    "OUTBOX",
+                  ),
+                  ConditionExpression: "attribute_not_exists(PK)",
+                },
+              },
+            ] as never,
+          }),
+        );
+        resumed += 1;
+      } catch (error) {
+        if (!isConditionalFailure(error)) throw error;
+      }
+    }
+    return resumed;
   }
   public async putSeed(items: readonly Item[]): Promise<void> {
     for (const value of items)

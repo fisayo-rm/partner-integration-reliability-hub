@@ -1,8 +1,11 @@
 import { DynamoDBClient } from "@aws-sdk/client-dynamodb";
 import { DynamoDBDocumentClient } from "@aws-sdk/lib-dynamodb";
-import { deliverMessageSchema, routeEventMessageSchema } from "@pirh/contracts";
 import { DynamoPersistence } from "@pirh/persistence";
-import { createSqsClient, ElasticMqQueue } from "@pirh/queue";
+import {
+  createSqsClient,
+  ElasticMqQueue,
+  outboxQueueMessage,
+} from "@pirh/queue";
 
 const region = process.env.AWS_REGION ?? "us-east-1";
 const dynamoEndpoint =
@@ -39,22 +42,23 @@ async function publish(
   record: Awaited<ReturnType<typeof persistence.getUnpublished>>[number],
 ) {
   try {
-    const message =
-      record.kind === "ROUTE_EVENT"
-        ? routeEventMessageSchema.parse({
-            schemaVersion: 1,
-            messageType: "ROUTE_EVENT",
-            tenantId: record.tenantId,
-            ...record.payload,
-          })
-        : record.kind === "DELIVER"
-          ? deliverMessageSchema.parse({
-              schemaVersion: 1,
-              messageType: "DELIVER",
-              tenantId: record.tenantId,
-              ...record.payload,
-            })
-          : undefined;
+    if (record.kind === "SCHEDULE_DELIVERY") {
+      const notBefore = new Date(String(record.payload.notBefore));
+      const delay = Math.max(
+        0,
+        Math.ceil((notBefore.getTime() - Date.now()) / 1_000),
+      );
+      if (delay > 900) {
+        await persistence.materializeScheduledWork(record);
+        return;
+      }
+      const message = outboxQueueMessage(record);
+      if (message === undefined) return;
+      await delivery.publish({ body: message as never, delaySeconds: delay });
+      await persistence.markPublished(record, new Date());
+      return;
+    }
+    const message = outboxQueueMessage(record);
     if (message === undefined) return;
     await (record.kind === "ROUTE_EVENT" ? routing : delivery).publish({
       body: message as never,

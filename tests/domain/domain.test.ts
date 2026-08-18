@@ -1,9 +1,13 @@
 import { describe, expect, test } from "vitest";
 import {
   asIdentifier,
+  classifyDeliveryResult,
   deriveEventStatus,
   failureCategories,
   isTerminalDeliveryState,
+  parseRetryAfter,
+  rateLimitDecision,
+  retryDelaySeconds,
   transitionDelivery,
   type DeliveryExecution,
   type EventOutcomeCounters,
@@ -178,4 +182,52 @@ test("keeps failure categories, identifiers, clocks, and random sources determin
   ).toBe("2026-08-13T00:00:00.000Z");
   expect(new SequenceRandom([0.25, 0.75]).next()).toBe(0.25);
   expect(new SequenceIdGenerator([ulid]).next("cor")).toBe(`cor_${ulid}`);
+});
+
+test("classifies retry outcomes and computes bounded retry/rate decisions", () => {
+  expect(classifyDeliveryResult({ status: 503 })).toMatchObject({
+    retryable: true,
+    failureCategory: "PARTNER_5XX",
+    countsTowardCircuit: true,
+  });
+  expect(classifyDeliveryResult({ status: 401 })).toMatchObject({
+    retryable: false,
+    failureCategory: "PARTNER_4XX",
+  });
+  expect(classifyDeliveryResult({ errorCode: "TIMEOUT" })).toMatchObject({
+    retryable: true,
+    failureCategory: "TIMEOUT",
+  });
+  const policy = delivery().configSnapshot.retryPolicy;
+  expect(retryDelaySeconds({ policy, attemptNumber: 2, random: 0 })).toBe(5);
+  expect(
+    retryDelaySeconds({
+      policy,
+      attemptNumber: 2,
+      random: 0.5,
+      retryAfterSeconds: 30,
+    }),
+  ).toBe(30);
+  expect(parseRetryAfter("3", new Date(0))).toBe(3);
+  expect(parseRetryAfter("invalid", new Date(0))).toBeUndefined();
+  const rate = {
+    requestsPerInterval: 1,
+    intervalSeconds: 1,
+    burstCapacity: 1,
+    safetyFactor: 1,
+  };
+  const first = rateLimitDecision({ policy: rate, nowMs: 1_000 });
+  expect(first.permitted).toBe(true);
+  expect(
+    rateLimitDecision({
+      policy: rate,
+      nowMs: 1_001,
+      state: {
+        theoreticalArrivalTimeMs: first.nextTheoreticalArrivalTimeMs ?? 0,
+        updatedAt: instant,
+        policyHash: "policy",
+        version: 1,
+      },
+    }).permitted,
+  ).toBe(false);
 });

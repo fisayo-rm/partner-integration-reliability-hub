@@ -11,6 +11,9 @@ export function buildMockPartnerAlpha(
 ) {
   const app = Fastify({ logger: false });
   let mode: MockMode = "success";
+  let failRemaining = 0;
+  let failFirstOnly = false;
+  let retryAfterSeconds = 1;
   const captures: unknown[] = [];
   const idempotency = new Set<string>();
   const requests: number[] = [];
@@ -43,6 +46,24 @@ export function buildMockPartnerAlpha(
     const payload = partnerAlphaPayloadSchema.safeParse(request.body);
     if (!payload.success)
       return reply.code(400).send({ error: "invalid_payload" });
+    if (failRemaining > 0) {
+      failRemaining -= 1;
+      return reply
+        .code(mode === "success" ? 503 : Number(mode))
+        .header("Retry-After", String(retryAfterSeconds))
+        .send({ error: "controlled" });
+    }
+    if (failFirstOnly) {
+      captures.push({
+        body: payload.data,
+        headers: {
+          "x-correlation-id": request.headers["x-correlation-id"],
+          "idempotency-key": request.headers["idempotency-key"],
+        },
+      });
+      if (captures.length > 100) captures.shift();
+      return reply.code(202).send({ received: true });
+    }
     const key = request.headers["idempotency-key"];
     if (typeof key === "string" && idempotency.has(key))
       return reply.code(200).send({ duplicate: true });
@@ -61,18 +82,28 @@ export function buildMockPartnerAlpha(
       );
       return { received: true };
     }
-    if (mode === "429") return reply.code(429).send({ error: "controlled" });
+    if (mode === "429")
+      return reply
+        .code(429)
+        .header("Retry-After", String(retryAfterSeconds))
+        .send({ error: "controlled" });
     if (mode === "503") return reply.code(503).send({ error: "controlled" });
     return reply.code(202).send({ received: true });
   });
   app.post("/__control/mode", async (request, reply) => {
     const denied = control(request, reply);
     if (denied !== undefined) return denied;
-    const value = (request.body as { mode?: MockMode } | undefined)?.mode;
+    const body = request.body as
+      | { mode?: MockMode; failFirst?: number; retryAfterSeconds?: number }
+      | undefined;
+    const value = body?.mode;
     if (!value || !["success", "429", "503", "timeout"].includes(value))
       return reply.code(400).send({ error: "invalid_mode" });
     mode = value;
-    return { mode };
+    failFirstOnly = body?.failFirst !== undefined;
+    failRemaining = Math.max(0, Math.floor(body?.failFirst ?? 0));
+    retryAfterSeconds = Math.max(0, Math.floor(body?.retryAfterSeconds ?? 1));
+    return { mode, failRemaining, retryAfterSeconds };
   });
   app.get("/__control/captures", async (request, reply) => {
     const denied = control(request, reply);

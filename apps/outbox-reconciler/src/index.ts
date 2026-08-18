@@ -1,8 +1,11 @@
 import { DynamoDBClient } from "@aws-sdk/client-dynamodb";
 import { DynamoDBDocumentClient } from "@aws-sdk/lib-dynamodb";
-import { deliverMessageSchema, routeEventMessageSchema } from "@pirh/contracts";
 import { DynamoPersistence } from "@pirh/persistence";
-import { createSqsClient, ElasticMqQueue } from "@pirh/queue";
+import {
+  createSqsClient,
+  ElasticMqQueue,
+  outboxQueueMessage,
+} from "@pirh/queue";
 
 const region = process.env.AWS_REGION ?? "us-east-1";
 const credentials = { accessKeyId: "local", secretAccessKey: "local" };
@@ -52,22 +55,25 @@ async function tick() {
       25,
     )) {
       try {
-        const message =
-          record.kind === "ROUTE_EVENT"
-            ? routeEventMessageSchema.parse({
-                schemaVersion: 1,
-                messageType: "ROUTE_EVENT",
-                tenantId: record.tenantId,
-                ...record.payload,
-              })
-            : record.kind === "DELIVER"
-              ? deliverMessageSchema.parse({
-                  schemaVersion: 1,
-                  messageType: "DELIVER",
-                  tenantId: record.tenantId,
-                  ...record.payload,
-                })
-              : undefined;
+        if (record.kind === "SCHEDULE_DELIVERY") {
+          const notBefore = new Date(String(record.payload.notBefore));
+          if (notBefore.getTime() - Date.now() > 900_000) {
+            await persistence.materializeScheduledWork(record);
+            continue;
+          }
+          const message = outboxQueueMessage(record);
+          if (message === undefined) continue;
+          await delivery.publish({
+            body: message as never,
+            delaySeconds: Math.max(
+              0,
+              Math.ceil((notBefore.getTime() - Date.now()) / 1_000),
+            ),
+          });
+          await persistence.markPublished(record, new Date());
+          continue;
+        }
+        const message = outboxQueueMessage(record);
         if (message === undefined) continue;
         await (record.kind === "ROUTE_EVENT" ? routing : delivery).publish({
           body: message as never,
@@ -92,6 +98,30 @@ async function tick() {
           }),
         );
       }
+    }
+  for (
+    let shard = 0;
+    shard < Number(process.env.OUTBOX_SHARD_COUNT ?? 8);
+    shard += 1
+  )
+    for (const work of await persistence.getDueScheduledWork(
+      shard,
+      new Date(),
+      25,
+    )) {
+      await delivery.publish({
+        body: {
+          schemaVersion: 1,
+          messageType: "DELIVER",
+          tenantId: work.tenantId,
+          eventId: work.eventId,
+          deliveryId: work.deliveryId,
+          correlationId: work.correlationId,
+          cause: work.cause,
+          notBefore: work.notBefore,
+        } as never,
+      });
+      await persistence.markScheduledWorkPublished(work, new Date());
     }
 }
 while (!stopping) {

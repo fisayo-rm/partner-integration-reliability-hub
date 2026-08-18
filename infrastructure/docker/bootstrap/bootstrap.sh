@@ -31,4 +31,14 @@ enable_ttl "$AUDIT_TABLE_NAME"
 for queue in "$ROUTING_QUEUE_NAME" "$ROUTING_DLQ_NAME" "$DELIVERY_QUEUE_NAME" "$DELIVERY_DLQ_NAME"; do
   if ! queue_exists "$queue"; then sqs create-queue --queue-name "$queue" >/dev/null; fi
 done
+configure_source_queue() {
+  source_name="$1"
+  dlq_name="$2"
+  source_url=$(sqs get-queue-url --queue-name "$source_name" --query 'QueueUrl' --output text)
+  dlq_url=$(sqs get-queue-url --queue-name "$dlq_name" --query 'QueueUrl' --output text)
+  dlq_arn=$(sqs get-queue-attributes --queue-url "$dlq_url" --attribute-names QueueArn --query 'Attributes.QueueArn' --output text)
+  sqs set-queue-attributes --queue-url "$source_url" --attributes "{\"VisibilityTimeout\":\"360\",\"MessageRetentionPeriod\":\"1209600\",\"ReceiveMessageWaitTimeSeconds\":\"20\",\"RedrivePolicy\":\"{\\\"deadLetterTargetArn\\\":\\\"$dlq_arn\\\",\\\"maxReceiveCount\\\":\\\"5\\\"}\"}" >/dev/null
+}
+configure_source_queue "$ROUTING_QUEUE_NAME" "$ROUTING_DLQ_NAME"
+configure_source_queue "$DELIVERY_QUEUE_NAME" "$DELIVERY_DLQ_NAME"
 echo "Bootstrap completed idempotently."

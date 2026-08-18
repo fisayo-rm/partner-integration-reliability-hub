@@ -1,4 +1,5 @@
 import {
+  ChangeMessageVisibilityCommand,
   DeleteMessageCommand,
   GetQueueUrlCommand,
   ReceiveMessageCommand,
@@ -8,8 +9,14 @@ import {
   type SQSClientConfig,
 } from "@aws-sdk/client-sqs";
 import type { QueuePublisher } from "@pirh/application";
-import { queueMessageSchema, type QueueMessage } from "@pirh/contracts";
-import type { JsonObject } from "@pirh/domain";
+import {
+  deliverMessageSchema,
+  queueMessageSchema,
+  resumeDestinationMessageSchema,
+  routeEventMessageSchema,
+  type QueueMessage,
+} from "@pirh/contracts";
+import type { JsonObject, OutboxRecord } from "@pirh/domain";
 
 export function createSqsClient(config: SQSClientConfig): SQSClient {
   return new SQSClient(config);
@@ -56,13 +63,17 @@ export class ElasticMqQueue implements QueuePublisher {
       }),
     );
   }
-  public async receive(max = 1, waitSeconds = 5): Promise<readonly Message[]> {
+  public async receive(
+    max = 1,
+    waitSeconds = 5,
+    visibilityTimeout = 360,
+  ): Promise<readonly Message[]> {
     const response = await this.client.send(
       new ReceiveMessageCommand({
         QueueUrl: await this.url(),
         MaxNumberOfMessages: max,
         WaitTimeSeconds: waitSeconds,
-        VisibilityTimeout: 30,
+        VisibilityTimeout: visibilityTimeout,
       }),
     );
     return response.Messages ?? [];
@@ -77,6 +88,55 @@ export class ElasticMqQueue implements QueuePublisher {
       }),
     );
   }
+  public async defer(message: Message, delaySeconds: number): Promise<void> {
+    if (message.ReceiptHandle === undefined)
+      throw new Error("Queue message receipt missing.");
+    await this.client.send(
+      new ChangeMessageVisibilityCommand({
+        QueueUrl: await this.url(),
+        ReceiptHandle: message.ReceiptHandle,
+        VisibilityTimeout: Math.max(
+          1,
+          Math.min(43_200, Math.ceil(delaySeconds)),
+        ),
+      }),
+    );
+  }
+}
+
+export function outboxQueueMessage(
+  record: OutboxRecord,
+): QueueMessage | undefined {
+  const base = {
+    schemaVersion: 1,
+    tenantId: record.tenantId,
+    ...record.payload,
+  };
+  if (record.kind === "ROUTE_EVENT")
+    return routeEventMessageSchema.parse({
+      ...base,
+      messageType: "ROUTE_EVENT",
+    });
+  if (
+    record.kind === "DELIVER" ||
+    record.kind === "SCHEDULE_DELIVERY" ||
+    record.kind === "RESUME_DELIVERY"
+  )
+    return deliverMessageSchema.parse({
+      ...base,
+      messageType: "DELIVER",
+      cause:
+        record.kind === "DELIVER"
+          ? (record.payload.cause ?? "INITIAL")
+          : (record.payload.cause ?? "RESUME"),
+    });
+  if (record.kind === "RESUME_DESTINATION")
+    return resumeDestinationMessageSchema.parse({
+      ...base,
+      messageType: "RESUME_DESTINATION",
+      cause: "DESTINATION_ENABLED",
+    });
+  return undefined;
 }
 
 export function parseQueueMessage(message: Message): QueueMessage {

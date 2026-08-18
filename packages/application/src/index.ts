@@ -1,5 +1,11 @@
 import { createHash } from "node:crypto";
-import { transitionDelivery } from "@pirh/domain";
+import {
+  classifyDeliveryResult,
+  isTerminalDeliveryState,
+  parseRetryAfter,
+  retryDelaySeconds,
+  transitionDelivery,
+} from "@pirh/domain";
 import type {
   ApiClient,
   AuditEvent,
@@ -10,6 +16,10 @@ import type {
   Destination,
   DeliveryAttempt,
   DeliveryHistoryEntry,
+  FailureCategory,
+  CircuitRuntimeState,
+  CircuitBreakerPolicy,
+  RateLimitPolicy,
   EventId,
   JsonObject,
   OutboxRecord,
@@ -110,6 +120,7 @@ export interface ControlPlaneRepository {
     destination: Destination,
     expectedVersion: number,
     audit: AuditEvent,
+    outbox?: OutboxRecord,
   ): Promise<"updated" | "not_found" | "conflict">;
   createTransformationVersion(
     context: TenantContext,
@@ -216,6 +227,70 @@ export interface DeliveryConcurrencyRepository {
     readonly attempt: DeliveryAttempt;
     readonly history: DeliveryHistoryEntry;
   }): Promise<boolean>;
+  startAttempt(input: {
+    readonly context: TenantContext;
+    readonly eventId: EventId;
+    readonly delivery: DeliveryExecution;
+    readonly expectedVersion: number;
+    readonly attempt: DeliveryAttempt;
+  }): Promise<DeliveryExecution | undefined>;
+  finalizeAttempt(input: {
+    readonly context: TenantContext;
+    readonly eventId: EventId;
+    readonly delivery: DeliveryExecution;
+    readonly expectedVersion: number;
+    readonly leaseToken: string;
+    readonly attempt: DeliveryAttempt;
+    readonly history: DeliveryHistoryEntry;
+    readonly outbox?: OutboxRecord;
+    readonly circuit?: CircuitRuntimeState;
+  }): Promise<boolean>;
+  defer(input: {
+    readonly context: TenantContext;
+    readonly eventId: EventId;
+    readonly delivery: DeliveryExecution;
+    readonly expectedVersion: number;
+    readonly leaseToken: string;
+    readonly history: DeliveryHistoryEntry;
+    readonly outbox: OutboxRecord;
+  }): Promise<boolean>;
+  recoverExpired(input: {
+    readonly context: TenantContext;
+    readonly eventId: EventId;
+    readonly deliveryId: DeliveryExecution["deliveryId"];
+    readonly now: Date;
+  }): Promise<boolean>;
+  acquireRatePermit(input: {
+    readonly context: TenantContext;
+    readonly destinationId: Destination["destinationId"];
+    readonly policy: RateLimitPolicy;
+    readonly now: Date;
+  }): Promise<{ readonly permitted: boolean; readonly nextEligibleAt: Date }>;
+  acquireCircuitPermit(input: {
+    readonly context: TenantContext;
+    readonly destinationId: Destination["destinationId"];
+    readonly policy: CircuitBreakerPolicy;
+    readonly owner: string;
+    readonly now: Date;
+  }): Promise<{
+    readonly allowed: boolean;
+    readonly probe: boolean;
+    readonly nextEligibleAt?: Date;
+    readonly state: CircuitRuntimeState;
+  }>;
+  circuitAfterAttempt(input: {
+    readonly current: CircuitRuntimeState;
+    readonly policy: CircuitBreakerPolicy;
+    readonly now: Date;
+    readonly success: boolean;
+    readonly countsTowardCircuit: boolean;
+    readonly probe: boolean;
+  }): CircuitRuntimeState;
+  resumeDestination(input: {
+    readonly context: TenantContext;
+    readonly destinationId: Destination["destinationId"];
+    readonly now: Date;
+  }): Promise<number>;
 }
 export interface NonceRepository {
   putIfAbsent(input: {
@@ -614,6 +689,25 @@ export class ControlPlaneService {
         destination.destinationId,
         { version: destination.version },
       ),
+      existing.enabled === false && destination.enabled === true
+        ? {
+            outboxId: this.dependencies.ids.next(
+              "obx",
+            ) as OutboxRecord["outboxId"],
+            kind: "RESUME_DESTINATION",
+            tenantId: context.tenantId,
+            aggregateType: "DESTINATION",
+            aggregateId: destination.destinationId,
+            target: "DELIVERY_QUEUE",
+            payload: {
+              destinationId: destination.destinationId,
+              correlationId: context.correlationId,
+            },
+            createdAt: this.dependencies.clock.now().toISOString() as never,
+            attempts: 0,
+            schemaVersion: 1,
+          }
+        : undefined,
     );
     if (result !== "updated")
       throw new Error(
@@ -941,6 +1035,7 @@ export class RoutingService {
           occurredAt: at,
           summary: "Delivery created and scheduled.",
           metadata: {},
+          expiresAt: delivery.expiresAt,
         };
         const outbox: OutboxRecord = {
           outboxId: deterministicIdentifier(
@@ -1013,6 +1108,7 @@ export class RoutingService {
             occurredAt: at,
             summary: "Transformation failed.",
             metadata: { failureCategory: "TRANSFORMATION_ERROR" },
+            expiresAt: delivery.expiresAt,
           },
         });
       }
@@ -1041,6 +1137,7 @@ export interface DeliveryDependencies {
   readonly oauth: OAuthTokenProvider;
   readonly ids: IdGenerator;
   readonly clock: Clock;
+  readonly random?: { next(): number };
 }
 
 function redactedHeaders(headers: Readonly<Record<string, string>>) {
@@ -1101,20 +1198,46 @@ export class DeliveryService {
     readonly deliveryId: DeliveryExecution["deliveryId"];
     readonly correlationId: CorrelationId;
     readonly owner: string;
-  }): Promise<void> {
+  }): Promise<{
+    readonly acknowledge: boolean;
+    readonly delaySeconds?: number;
+  }> {
     const context = routingContext(input.tenantId, input.correlationId);
     const initial = await this.dependencies.core.getDelivery(
       context,
       input.deliveryId,
     );
-    if (
-      initial === undefined ||
-      ["succeeded", "failed_terminal", "dead_lettered", "cancelled"].includes(
-        initial.state,
-      )
-    )
-      return;
+    if (initial === undefined || isTerminalDeliveryState(initial.state))
+      return { acknowledge: true };
     const now = this.dependencies.clock.now();
+    if (
+      initial.state === "in_progress" &&
+      initial.leaseExpiresAt !== undefined &&
+      new Date(initial.leaseExpiresAt).getTime() <= now.getTime()
+    ) {
+      await this.dependencies.repository.recoverExpired({
+        context,
+        eventId: input.eventId,
+        deliveryId: input.deliveryId,
+        now,
+      });
+      return { acknowledge: true };
+    }
+    if (
+      initial.nextEligibleAt !== undefined &&
+      new Date(initial.nextEligibleAt).getTime() > now.getTime()
+    ) {
+      return {
+        acknowledge: false,
+        delaySeconds: Math.max(
+          1,
+          Math.ceil(
+            (new Date(initial.nextEligibleAt).getTime() - now.getTime()) /
+              1_000,
+          ),
+        ),
+      };
+    }
     const token = this.dependencies.ids.next("lease");
     const leased = await this.dependencies.repository.acquireLease({
       context,
@@ -1127,111 +1250,353 @@ export class DeliveryService {
         now.getTime() + initial.configSnapshot.timeoutMs + 5_000,
       ).toISOString(),
     });
-    if (leased === undefined || leased.leaseToken !== token) return;
-    const secretName = leased.configSnapshot.secretReferenceNames[0];
-    if (secretName === undefined) throw new Error("SECRET_NOT_FOUND");
-    const secret = await this.dependencies.secrets.resolve(context, {
-      name: secretName,
+    // A concurrent worker owns the durable lease, so this duplicate message is
+    // safe to acknowledge: the owner (or expired-lease recovery) remains durable.
+    if (leased === undefined || leased.leaseToken !== token)
+      return { acknowledge: true };
+    const defer = async (
+      to: "scheduled" | "rate_limited",
+      category: FailureCategory,
+      at: Date,
+      summary: string,
+    ) => {
+      const transition = transitionDelivery(leased, {
+        to,
+        at: now.toISOString() as never,
+        expectedVersion: leased.version,
+        leaseToken: leased.leaseToken ?? (token as never),
+        nextEligibleAt: at.toISOString() as never,
+        blockedReason: category,
+      });
+      const outbox: OutboxRecord = {
+        outboxId: this.dependencies.ids.next("obx") as OutboxRecord["outboxId"],
+        kind: "SCHEDULE_DELIVERY",
+        tenantId: leased.tenantId,
+        aggregateType: "DELIVERY",
+        aggregateId: leased.deliveryId,
+        target: "SCHEDULER",
+        payload: {
+          eventId: leased.eventId,
+          deliveryId: leased.deliveryId,
+          correlationId: leased.correlationId,
+          notBefore: at.toISOString(),
+          cause: "RESUME",
+        },
+        createdAt: now.toISOString() as never,
+        attempts: 0,
+        schemaVersion: 1,
+      };
+      await this.dependencies.repository.defer({
+        context,
+        eventId: leased.eventId,
+        delivery: transition,
+        expectedVersion: leased.version,
+        leaseToken: leased.leaseToken ?? token,
+        history: {
+          historyId: this.dependencies.ids.next("req"),
+          deliveryId: leased.deliveryId,
+          tenantId: leased.tenantId,
+          correlationId: leased.correlationId,
+          type:
+            category === "RATE_LIMITED"
+              ? "rate_limited"
+              : category === "CIRCUIT_OPEN"
+                ? "circuit_open"
+                : "destination_disabled",
+          occurredAt: now.toISOString() as never,
+          summary,
+          metadata: {
+            failureCategory: category,
+            nextEligibleAt: at.toISOString(),
+          },
+          expiresAt: leased.expiresAt,
+        },
+        outbox,
+      });
+    };
+    const destination = await this.dependencies.core.getDestination(
+      context,
+      leased.destinationId,
+    );
+    if (destination === undefined || !destination.enabled) {
+      await defer(
+        "scheduled",
+        "DESTINATION_DISABLED",
+        new Date(now.getTime() + 300_000),
+        "Destination is disabled; delivery deferred.",
+      );
+      return { acknowledge: true };
+    }
+    const circuit = await this.dependencies.repository.acquireCircuitPermit({
+      context,
+      destinationId: leased.destinationId,
+      policy: destination.circuitBreakerPolicy,
+      owner: input.owner,
+      now,
     });
+    if (!circuit.allowed) {
+      await defer(
+        "scheduled",
+        "CIRCUIT_OPEN",
+        circuit.nextEligibleAt ?? new Date(now.getTime() + 5_000),
+        "Circuit is open; delivery deferred.",
+      );
+      return { acknowledge: true };
+    }
+    const rate = await this.dependencies.repository.acquireRatePermit({
+      context,
+      destinationId: leased.destinationId,
+      policy: destination.rateLimitPolicy,
+      now,
+    });
+    if (!rate.permitted) {
+      await defer(
+        "rate_limited",
+        "RATE_LIMITED",
+        rate.nextEligibleAt,
+        "Destination rate limit deferred delivery.",
+      );
+      return { acknowledge: true };
+    }
     const headers: Record<string, string> = {
       "content-type": "application/json",
     };
-    if (leased.configSnapshot.authType === "api_key") {
-      const headerName = leased.configSnapshot.authConfiguration.headerName;
-      if (typeof headerName !== "string")
-        throw new Error("INVALID_AUTH_CONFIGURATION");
-      headers[headerName] = secret.value;
-      if (leased.configSnapshot.idempotencyHeader !== undefined)
-        headers[leased.configSnapshot.idempotencyHeader] =
-          leased.partnerIdempotencyKey;
-    } else {
-      const configuration = leased.configSnapshot.authConfiguration;
-      if (
-        typeof configuration.tokenUrl !== "string" ||
-        typeof configuration.clientId !== "string" ||
-        (configuration.authenticationStyle !== "basic" &&
-          configuration.authenticationStyle !== "body") ||
-        !Array.isArray(configuration.scopes)
-      )
-        throw new Error("INVALID_AUTH_CONFIGURATION");
-      headers.authorization = `Bearer ${await this.dependencies.oauth.get({
-        destinationId: leased.destinationId,
-        tokenUrl: configuration.tokenUrl,
-        clientId: configuration.clientId,
-        clientSecret: secret.value,
-        scopes: configuration.scopes.filter(
-          (scope): scope is string => typeof scope === "string",
-        ),
-        authenticationStyle: configuration.authenticationStyle,
-        correlationId: leased.correlationId,
-      })}`;
-      headers["x-delivery-key"] = leased.partnerIdempotencyKey;
-    }
     const started = this.dependencies.clock.now();
     const body = JSON.stringify(leased.transformedPayload);
-    const response = await this.dependencies.http.send({
-      url: leased.configSnapshot.url,
-      method: leased.configSnapshot.method,
-      headers,
-      body,
-      timeoutMs: leased.configSnapshot.timeoutMs,
-      correlationId: leased.correlationId,
-    });
-    if (response.status < 200 || response.status >= 300)
-      throw new Error(`PARTNER_HTTP_${response.status}`);
-    const completed = this.dependencies.clock.now();
-    const evidence = responseEvidence(
-      response.headers,
-      response.body,
-      leased.configSnapshot.redactionPaths,
-    );
-    const succeeded = {
-      ...transitionDelivery(leased, {
-        to: "succeeded",
-        at: completed.toISOString() as never,
-        expectedVersion: leased.version,
-        leaseToken: leased.leaseToken,
-      }),
-      attemptCount: leased.attemptCount + 1,
-    };
     const attempt: DeliveryAttempt = {
       attemptId: this.dependencies.ids.next(
         "att",
       ) as DeliveryAttempt["attemptId"],
-      attemptNumber: succeeded.attemptCount,
+      attemptNumber: leased.attemptCount + 1,
       deliveryId: leased.deliveryId,
       correlationId: leased.correlationId,
       startedAt: started.toISOString() as never,
-      completedAt: completed.toISOString() as never,
-      durationMs: completed.getTime() - started.getTime(),
       requestMethod: leased.configSnapshot.method,
       requestUrl: leased.configSnapshot.url,
-      requestHeadersRedacted: redactedHeaders(headers),
+      requestHeadersRedacted: {},
       requestBodyHash: createHash("sha256").update(body).digest("hex"),
-      responseStatus: response.status,
-      responseHeadersRedacted: evidence.headers,
-      responseBodyExcerptRedacted: evidence.bodyExcerpt,
-      responseBodyHash: evidence.bodyHash,
-      outcome: "succeeded",
+      outcome: "started",
+      expiresAt: leased.expiresAt,
     };
-    const history: DeliveryHistoryEntry = {
-      historyId: this.dependencies.ids.next("req"),
-      deliveryId: leased.deliveryId,
-      tenantId: leased.tenantId,
-      correlationId: leased.correlationId,
-      type: "state_transition",
-      occurredAt: completed.toISOString() as never,
-      summary: "Delivery succeeded.",
-      metadata: { state: "succeeded" },
-    };
-    const finalized = await this.dependencies.repository.finalizeSuccess({
+    const startedDelivery = await this.dependencies.repository.startAttempt({
       context,
       eventId: leased.eventId,
-      delivery: succeeded,
+      delivery: leased,
       expectedVersion: leased.version,
       attempt,
-      history,
+    });
+    if (startedDelivery === undefined) return { acknowledge: true };
+    let response: Awaited<ReturnType<PartnerHttpClient["send"]>> | undefined;
+    let errorCode: string | undefined;
+    try {
+      const secretName = startedDelivery.configSnapshot.secretReferenceNames[0];
+      if (secretName === undefined) throw new Error("SECRET_NOT_FOUND");
+      const secret = await this.dependencies.secrets.resolve(context, {
+        name: secretName,
+      });
+      if (startedDelivery.configSnapshot.authType === "api_key") {
+        const headerName =
+          startedDelivery.configSnapshot.authConfiguration.headerName;
+        if (typeof headerName !== "string")
+          throw new Error("INVALID_DESTINATION");
+        headers[headerName] = secret.value;
+        if (startedDelivery.configSnapshot.idempotencyHeader !== undefined)
+          headers[startedDelivery.configSnapshot.idempotencyHeader] =
+            startedDelivery.partnerIdempotencyKey;
+      } else {
+        const configuration = startedDelivery.configSnapshot.authConfiguration;
+        if (
+          typeof configuration.tokenUrl !== "string" ||
+          typeof configuration.clientId !== "string" ||
+          (configuration.authenticationStyle !== "basic" &&
+            configuration.authenticationStyle !== "body") ||
+          !Array.isArray(configuration.scopes)
+        )
+          throw new Error("INVALID_DESTINATION");
+        headers.authorization = `Bearer ${await this.dependencies.oauth.get({
+          destinationId: startedDelivery.destinationId,
+          tokenUrl: configuration.tokenUrl,
+          clientId: configuration.clientId,
+          clientSecret: secret.value,
+          scopes: configuration.scopes.filter(
+            (scope): scope is string => typeof scope === "string",
+          ),
+          authenticationStyle: configuration.authenticationStyle,
+          correlationId: startedDelivery.correlationId,
+        })}`;
+        headers["x-delivery-key"] = startedDelivery.partnerIdempotencyKey;
+      }
+      response = await this.dependencies.http.send({
+        url: startedDelivery.configSnapshot.url,
+        method: startedDelivery.configSnapshot.method,
+        headers,
+        body,
+        timeoutMs: startedDelivery.configSnapshot.timeoutMs,
+        correlationId: startedDelivery.correlationId,
+      });
+    } catch (error) {
+      const code = error instanceof Error ? error.message : "UNKNOWN";
+      errorCode = /TIMEOUT/.test(code)
+        ? "TIMEOUT"
+        : /DNS|ENOTFOUND|EAI_AGAIN/.test(code)
+          ? "DNS_ERROR"
+          : /ECONN|CONNECTION/.test(code)
+            ? "CONNECTION_ERROR"
+            : /TLS|CERT/.test(code)
+              ? "TLS_ERROR"
+              : /RESPONSE_TOO_LARGE/.test(code)
+                ? "RESPONSE_TOO_LARGE"
+                : /INVALID_|UNSAFE|REDIRECT|ENCODED/.test(code)
+                  ? "RESPONSE_CONTRACT_ERROR"
+                  : /SECRET_NOT_FOUND/.test(code)
+                    ? "SECRET_NOT_FOUND"
+                    : /OAUTH/.test(code)
+                      ? "OAUTH_TOKEN_ERROR"
+                      : "UNKNOWN";
+    }
+    const completed = this.dependencies.clock.now();
+    const classification = classifyDeliveryResult({
+      ...(response === undefined
+        ? { errorCode: errorCode ?? "UNKNOWN" }
+        : { status: response.status }),
+    });
+    const retryAfter =
+      response === undefined
+        ? undefined
+        : parseRetryAfter(response.headers["retry-after"], completed);
+    const delay = classification.retryable
+      ? retryDelaySeconds({
+          policy: startedDelivery.configSnapshot.retryPolicy,
+          attemptNumber: startedDelivery.attemptCount,
+          random: this.dependencies.random?.next() ?? Math.random(),
+          ...(retryAfter === undefined
+            ? {}
+            : { retryAfterSeconds: retryAfter }),
+        })
+      : undefined;
+    const exhausted =
+      classification.retryable &&
+      startedDelivery.attemptCount >= startedDelivery.maxAttempts;
+    const state = classification.success
+      ? "succeeded"
+      : exhausted
+        ? "dead_lettered"
+        : classification.retryable
+          ? "retry_scheduled"
+          : "failed_terminal";
+    const nextEligibleAt =
+      delay === undefined
+        ? undefined
+        : new Date(completed.getTime() + Math.ceil(delay * 1_000));
+    const delivery = transitionDelivery(startedDelivery, {
+      to: state,
+      at: completed.toISOString() as never,
+      expectedVersion: startedDelivery.version,
+      leaseToken: startedDelivery.leaseToken ?? (token as never),
+      ...(nextEligibleAt === undefined
+        ? {}
+        : { nextEligibleAt: nextEligibleAt.toISOString() as never }),
+      ...(classification.failureCategory === undefined
+        ? {}
+        : { blockedReason: classification.failureCategory }),
+    });
+    const evidence =
+      response === undefined
+        ? undefined
+        : responseEvidence(
+            response.headers,
+            response.body,
+            startedDelivery.configSnapshot.redactionPaths,
+          );
+    const completedAttempt: DeliveryAttempt = {
+      ...attempt,
+      completedAt: completed.toISOString() as never,
+      durationMs: completed.getTime() - started.getTime(),
+      requestHeadersRedacted: redactedHeaders(headers),
+      ...(response === undefined || evidence === undefined
+        ? {}
+        : {
+            responseStatus: response.status,
+            responseHeadersRedacted: evidence.headers,
+            responseBodyExcerptRedacted: evidence.bodyExcerpt,
+            responseBodyHash: evidence.bodyHash,
+          }),
+      outcome: classification.success ? "succeeded" : "failed",
+      ...(classification.failureCategory === undefined
+        ? {}
+        : { failureCategory: classification.failureCategory }),
+      retryable: classification.retryable,
+    };
+    const outbox =
+      nextEligibleAt === undefined
+        ? undefined
+        : {
+            outboxId: this.dependencies.ids.next(
+              "obx",
+            ) as OutboxRecord["outboxId"],
+            kind: "SCHEDULE_DELIVERY" as const,
+            tenantId: startedDelivery.tenantId,
+            aggregateType: "DELIVERY" as const,
+            aggregateId: startedDelivery.deliveryId,
+            target: "SCHEDULER" as const,
+            payload: {
+              eventId: startedDelivery.eventId,
+              deliveryId: startedDelivery.deliveryId,
+              correlationId: startedDelivery.correlationId,
+              notBefore: nextEligibleAt.toISOString(),
+              cause: "RETRY",
+            },
+            createdAt: completed.toISOString() as never,
+            attempts: 0,
+            schemaVersion: 1 as const,
+          };
+    const circuitAfter = this.dependencies.repository.circuitAfterAttempt({
+      current: circuit.state,
+      policy: destination.circuitBreakerPolicy,
+      now: completed,
+      success: classification.success,
+      countsTowardCircuit: classification.countsTowardCircuit,
+      probe: circuit.probe,
+    });
+    const finalized = await this.dependencies.repository.finalizeAttempt({
+      context,
+      eventId: startedDelivery.eventId,
+      delivery,
+      expectedVersion: startedDelivery.version,
+      leaseToken: startedDelivery.leaseToken ?? token,
+      attempt: completedAttempt,
+      history: {
+        historyId: this.dependencies.ids.next("req"),
+        deliveryId: startedDelivery.deliveryId,
+        tenantId: startedDelivery.tenantId,
+        correlationId: startedDelivery.correlationId,
+        type:
+          state === "dead_lettered"
+            ? "dead_lettered"
+            : state === "retry_scheduled"
+              ? "retry_scheduled"
+              : "state_transition",
+        occurredAt: completed.toISOString() as never,
+        summary: classification.success
+          ? "Delivery succeeded."
+          : exhausted
+            ? "Delivery retries exhausted."
+            : classification.retryable
+              ? "Delivery retry scheduled."
+              : "Delivery failed terminally.",
+        metadata: {
+          state,
+          failureCategory: classification.failureCategory ?? "UNKNOWN",
+          ...(nextEligibleAt === undefined
+            ? {}
+            : { nextEligibleAt: nextEligibleAt.toISOString() }),
+        },
+        expiresAt: startedDelivery.expiresAt,
+      },
+      ...(outbox === undefined ? {} : { outbox }),
+      circuit: circuitAfter,
     });
     if (!finalized) throw new Error("DELIVERY_FINALIZATION_CONFLICT");
+    return { acknowledge: true };
   }
 }

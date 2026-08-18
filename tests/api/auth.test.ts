@@ -24,8 +24,9 @@ test("test-only Fastify routes establish trusted JWT and HMAC tenant context", a
     "application/json",
     { parseAs: "buffer" },
     (request, body, done) => {
-      request.rawBody = body;
-      done(null, JSON.parse(body.toString("utf8")));
+      const rawBody = typeof body === "string" ? Buffer.from(body) : body;
+      request.rawBody = rawBody;
+      done(null, JSON.parse(rawBody.toString("utf8")));
     },
   );
   app.get(

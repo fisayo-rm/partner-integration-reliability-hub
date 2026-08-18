@@ -20,6 +20,7 @@ test("pull-request workflow runs Stage A and the local platform/integration smok
       "Format check",
       "Lint",
       "TypeScript compile",
+      "Test TypeScript compile",
       "Architecture dependency test",
       "Unit tests",
       "Build all workspaces",
@@ -31,7 +32,12 @@ test("pull-request workflow runs Stage A and the local platform/integration smok
     .map((step: { run?: string }) => step.run)
     .filter(Boolean);
   expect(commands).toEqual(
-    expect.arrayContaining(["pnpm format:check", "pnpm test", "pnpm build"]),
+    expect.arrayContaining([
+      "pnpm format:check",
+      "pnpm test:typecheck",
+      "pnpm test",
+      "pnpm build",
+    ]),
   );
   expect(
     jobs["local-platform"].steps.map((step: { name?: string }) => step.name),

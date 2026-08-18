@@ -18,9 +18,9 @@ pnpm install --frozen-lockfile
 pnpm verify
 ```
 
-`pnpm verify` runs formatting, linting, strict TypeScript compilation, dependency
-architecture checks, unit tests, every workspace build, secret scanning, and the
-high-severity dependency audit.
+`pnpm verify` runs formatting, linting, strict TypeScript compilation for source
+and tests, dependency architecture checks, unit tests, every workspace build,
+secret scanning, and the high-severity dependency audit.
 
 ## Individual developer commands
 
@@ -28,6 +28,7 @@ high-severity dependency audit.
 pnpm format:check
 pnpm lint
 pnpm typecheck
+pnpm test:typecheck
 pnpm architecture
 pnpm test
 pnpm build

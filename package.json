@@ -14,6 +14,7 @@
     "format:check": "prettier --check . --ignore-unknown",
     "lint": "eslint .",
     "typecheck": "tsc --build tsconfig.build.json",
+    "test:typecheck": "tsc --project tests/tsconfig.json",
     "architecture": "node scripts/check-architecture.mjs",
     "test": "vitest run",
     "test:integration": "vitest run --config vitest.integration.config.ts",
@@ -27,7 +28,7 @@
     "demo:m04": "node scripts/demo-m04.mjs",
     "demo:m05": "node scripts/demo-m05.mjs",
     "demo:m06": "node scripts/demo-m06.mjs",
-    "verify": "pnpm format:check && pnpm lint && pnpm typecheck && pnpm architecture && pnpm test && pnpm build && pnpm secret:scan && pnpm audit"
+    "verify": "pnpm format:check && pnpm lint && pnpm typecheck && pnpm test:typecheck && pnpm architecture && pnpm test && pnpm build && pnpm secret:scan && pnpm audit"
   },
   "devDependencies": {
     "@aws-sdk/client-dynamodb": "3.1111.0",

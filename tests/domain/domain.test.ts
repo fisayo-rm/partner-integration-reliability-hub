@@ -26,11 +26,12 @@ function delivery(
   state: DeliveryExecution["state"] = "pending",
 ): DeliveryExecution {
   return {
-    deliveryId: id("dlv"),
-    eventId: id("evt"),
-    tenantId: id("tenant"),
-    partnerId: id("ptr"),
-    destinationId: id("dst"),
+    deliveryId: id<"DeliveryId">("dlv"),
+    eventId: id<"EventId">("evt"),
+    correlationId: id<"CorrelationId">("cor"),
+    tenantId: id<"TenantId">("tenant"),
+    partnerId: id<"PartnerId">("ptr"),
+    destinationId: id<"DestinationId">("dst"),
     executionType: "ORIGINAL",
     state,
     attemptCount: 0,
@@ -50,8 +51,9 @@ function delivery(
       rateLimitPolicyId: "rate-default",
       circuitBreakerPolicyId: "circuit-default",
       authType: "api_key",
+      authConfiguration: {},
       secretReferenceNames: [],
-      transformationId: id("trf"),
+      transformationId: id<"TransformationId">("trf"),
       transformationVersion: 1,
       redactionPaths: [],
     },
@@ -81,7 +83,7 @@ describe("delivery state transitions", () => {
       expectedVersion: 1,
       nextEligibleAt: instant,
     });
-    const token = id("lease");
+    const token = id<"LeaseToken">("lease");
     const started = transitionDelivery(scheduled, {
       to: "in_progress",
       at: instant,
@@ -106,13 +108,16 @@ describe("delivery state transitions", () => {
         expectedVersion: 1,
       }),
     ).toThrow("Cannot transition");
-    const inProgress = { ...delivery("in_progress"), leaseToken: id("lease") };
+    const inProgress = {
+      ...delivery("in_progress"),
+      leaseToken: id<"LeaseToken">("lease"),
+    };
     expect(() =>
       transitionDelivery(inProgress, {
         to: "failed_terminal",
         at: instant,
         expectedVersion: 1,
-        leaseToken: id("other"),
+        leaseToken: id<"LeaseToken">("other"),
       }),
     ).toThrow("active lease token");
   });
@@ -175,7 +180,7 @@ test("derives every event outcome state and rejects inconsistent counters", () =
 });
 test("keeps failure categories, identifiers, clocks, and random sources deterministic", () => {
   expect(failureCategories).toHaveLength(17);
-  expect(id("evt")).toMatch(/^evt_/);
+  expect(id<"EventId">("evt")).toMatch(/^evt_/);
   expect(() => asIdentifier("evt", "evt_not-a-ulid")).toThrow("ULID");
   expect(
     new FixedClock(new Date("2026-08-13T00:00:00Z")).now().toISOString(),

@@ -1,0 +1,16 @@
+{
+  "extends": "./tsconfig.base.json",
+  "compilerOptions": {
+    "noEmit": true,
+    "declaration": false,
+    "declarationMap": false,
+    "sourceMap": false,
+    "paths": {
+      "@pirh/*": ["./packages/*/src/index.ts", "./apps/*/src/index.ts"]
+    },
+    "types": ["node", "vitest/globals"],
+    "allowJs": true,
+    "checkJs": false
+  },
+  "include": ["tests/**/*.ts"]
+}

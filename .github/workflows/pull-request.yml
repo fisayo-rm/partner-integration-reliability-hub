@@ -30,6 +30,8 @@ jobs:
         run: pnpm lint
       - name: TypeScript compile
         run: pnpm typecheck
+      - name: Test TypeScript compile
+        run: pnpm test:typecheck
       - name: Architecture dependency test
         run: pnpm architecture
       - name: Unit tests

@@ -26,6 +26,7 @@
     "local:verify": "node scripts/verify-local-platform.mjs",
     "demo:m04": "node scripts/demo-m04.mjs",
     "demo:m05": "node scripts/demo-m05.mjs",
+    "demo:m06": "node scripts/demo-m06.mjs",
     "verify": "pnpm format:check && pnpm lint && pnpm typecheck && pnpm architecture && pnpm test && pnpm build && pnpm secret:scan && pnpm audit"
   },
   "devDependencies": {

@@ -6,7 +6,11 @@ import {
   OidcAccessTokenVerifier,
   ProducerAuthenticator,
 } from "@pirh/auth";
-import { ControlPlaneService, EventIngestionService } from "@pirh/application";
+import {
+  ControlPlaneService,
+  EventIngestionService,
+  ReplayService,
+} from "@pirh/application";
 import { DynamoPersistence } from "@pirh/persistence";
 import { LocalDynamoDbSecretStore } from "@pirh/secrets";
 import { SafePartnerHttpClient } from "@pirh/partner-http";
@@ -87,6 +91,19 @@ const service = new ControlPlaneService({
   ids: { next: (prefix) => id(prefix) },
   clock: { now: () => new Date() },
 });
+const consoleAuthenticator = new ConsoleAuthenticator(
+  new OidcAccessTokenVerifier({
+    issuer: process.env.OIDC_ISSUER ?? "http://keycloak:8080/realms/pirh-local",
+    audience: process.env.OIDC_AUDIENCE ?? "pirh-console",
+    jwksUri:
+      process.env.OIDC_JWKS_URI ??
+      "http://keycloak:8080/realms/pirh-local/protocol/openid-connect/certs",
+    allowedAlgorithms: ["RS256"],
+    tokenUseClaim: "typ",
+    tokenUseValue: "Bearer",
+  }),
+  persistence,
+);
 const app = await buildApi({
   requiredConfiguration,
   dynamoDb: httpProbe(
@@ -100,20 +117,7 @@ const app = await buildApi({
   controlPlane: {
     service,
     repository: persistence,
-    consoleAuthenticator: new ConsoleAuthenticator(
-      new OidcAccessTokenVerifier({
-        issuer:
-          process.env.OIDC_ISSUER ?? "http://keycloak:8080/realms/pirh-local",
-        audience: process.env.OIDC_AUDIENCE ?? "pirh-console",
-        jwksUri:
-          process.env.OIDC_JWKS_URI ??
-          "http://keycloak:8080/realms/pirh-local/protocol/openid-connect/certs",
-        allowedAlgorithms: ["RS256"],
-        tokenUseClaim: "typ",
-        tokenUseValue: "Bearer",
-      }),
-      persistence,
-    ),
+    consoleAuthenticator,
     cursorSecret:
       process.env.LOCAL_CURSOR_SECRET ??
       "local-cursor-secret-not-for-production",
@@ -137,6 +141,21 @@ const app = await buildApi({
       secrets,
       persistence,
     ),
+  },
+  operations: {
+    service: new ReplayService({
+      core: persistence,
+      repository: persistence,
+      execute: executeTransformation,
+      ids: { next: (prefix) => id(prefix) },
+      clock: { now: () => new Date() },
+      retentionDays: Number(process.env.EVENT_RETENTION_DAYS ?? 30),
+    }),
+    repository: persistence,
+    consoleAuthenticator,
+    cursorSecret:
+      process.env.LOCAL_CURSOR_SECRET ??
+      "local-cursor-secret-not-for-production",
   },
   requestId: () => id("req"),
 });

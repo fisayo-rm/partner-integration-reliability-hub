@@ -95,6 +95,10 @@ export const key = {
     PK: `TENANT#${tenantId}#IDEMPOTENCY#${clientId}`,
     SK: `KEY#${hash}`,
   }),
+  replayIdempotency: (tenantId: TenantId, hash: string) => ({
+    PK: `TENANT#${tenantId}#REPLAY_IDEMPOTENCY`,
+    SK: `KEY#${hash}`,
+  }),
   nonce: (tenantId: TenantId, clientId: ClientId, hash: string) => ({
     PK: `TENANT#${tenantId}#NONCE#${clientId}`,
     SK: `NONCE#${hash}`,
@@ -117,12 +121,29 @@ export const key = {
     PK: `TENANT#${tenantId}#DELIVERY_INDEX#${category}`,
     SK: `${updatedAt}#DELIVERY#${deliveryId}`,
   }),
+  replayRelation: (
+    tenantId: TenantId,
+    eventId: string,
+    originalDeliveryId: string,
+    replayId: string,
+  ) => ({
+    PK: `TENANT#${tenantId}#EVENT#${eventId}`,
+    SK: `DELIVERY#${originalDeliveryId}#REPLAY#${replayId}`,
+  }),
   rollup: (tenantId: TenantId, hour: string, shard?: number) => ({
     PK:
       shard === undefined
         ? `TENANT#${tenantId}#ROLLUP#HOUR#${hour}`
         : `TENANT#${tenantId}#ROLLUP#HOUR#${hour}#SHARD#${shard}`,
     SK: shard === undefined ? "DESTINATION" : "SYSTEM",
+  }),
+  destinationRollup: (
+    tenantId: TenantId,
+    hour: string,
+    destinationId: string,
+  ) => ({
+    PK: `TENANT#${tenantId}#ROLLUP#HOUR#${hour}`,
+    SK: `DESTINATION#${destinationId}`,
   }),
   outbox: (shard: number, createdAt: string, outboxId: string) => ({
     PK: `OUTBOX#${shard}`,

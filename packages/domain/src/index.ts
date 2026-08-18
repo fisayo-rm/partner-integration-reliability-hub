@@ -371,6 +371,43 @@ export interface AuditEvent {
   readonly occurredAt: IsoInstant;
   readonly expiresAt: IsoInstant;
 }
+/** Immutable link between an original execution and one replay execution. */
+export interface ReplayRelation {
+  readonly replayId: ReplayId;
+  readonly tenantId: TenantId;
+  readonly eventId: EventId;
+  readonly originalDeliveryId: DeliveryId;
+  readonly replayDeliveryId: DeliveryId;
+  readonly requestedAt: IsoInstant;
+  readonly requestedBy: string;
+  readonly reason: string;
+  readonly correctionConfirmed: boolean;
+  readonly originalDestinationVersion: number;
+  readonly originalTransformationId: TransformationId;
+  readonly originalTransformationVersion: number;
+  readonly replayDestinationVersion: number;
+  readonly replayTransformationId: TransformationId;
+  readonly replayTransformationVersion: number;
+  readonly expiresAt: IsoInstant;
+}
+export interface OperationalRollup {
+  readonly tenantId: TenantId;
+  readonly hour: string;
+  readonly destinationId?: DestinationId;
+  readonly shard?: number;
+  readonly acceptedEvents: number;
+  readonly deliveryAttempts: number;
+  readonly deliverySuccesses: number;
+  readonly deliveryFailures: number;
+  readonly retriesScheduled: number;
+  readonly deadLetters: number;
+  readonly replaysRequested: number;
+  readonly replaySuccesses: number;
+  readonly replayFailures: number;
+  readonly latencyTotalMs: number;
+  readonly latencyCount: number;
+  readonly latencyBuckets: Readonly<Record<string, number>>;
+}
 export type OutboxKind =
   | "ROUTE_EVENT"
   | "DELIVER"
@@ -421,6 +458,33 @@ export class DomainError extends Error {
 }
 export function isTerminalDeliveryState(state: DeliveryState): boolean {
   return terminalDeliveryStates.has(state);
+}
+const replayableTerminalCategories = new Set<FailureCategory>([
+  "TRANSFORMATION_ERROR",
+  "INVALID_DESTINATION",
+  "SECRET_NOT_FOUND",
+  "OAUTH_TOKEN_ERROR",
+  "PARTNER_4XX",
+  "RESPONSE_TOO_LARGE",
+  "RESPONSE_CONTRACT_ERROR",
+]);
+export function replayEligibility(input: {
+  readonly state: DeliveryState;
+  readonly failureCategory?: FailureCategory;
+  readonly correctionConfirmed: boolean;
+}): { readonly eligible: boolean; readonly requiresCorrection: boolean } {
+  if (input.state === "dead_lettered")
+    return { eligible: true, requiresCorrection: false };
+  if (
+    input.state === "failed_terminal" &&
+    input.failureCategory !== undefined &&
+    replayableTerminalCategories.has(input.failureCategory)
+  )
+    return {
+      eligible: input.correctionConfirmed,
+      requiresCorrection: true,
+    };
+  return { eligible: false, requiresCorrection: false };
 }
 export function validatePolicy(
   policy: RetryPolicy | RateLimitPolicy | CircuitBreakerPolicy,

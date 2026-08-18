@@ -17,9 +17,14 @@ import {
 } from "../../packages/auth/src/index.js";
 import type {
   CanonicalEvent,
+  DeliveryExecution,
+  Destination,
   OutboxRecord,
+  Partner,
   TenantContext,
+  TransformationVersion,
 } from "../../packages/domain/src/index.js";
+import { ReplayService } from "../../packages/application/src/index.js";
 
 const suffix = randomBytes(6).toString("hex");
 const endpoint = process.env.DYNAMODB_ENDPOINT ?? "http://localhost:8000";
@@ -278,4 +283,241 @@ test("M03 local seed provides two tenant-scoped partner configurations and alias
   ).resolves.toMatchObject({
     value: expect.any(String),
   });
+});
+
+test("M06 replay is race-safe, immutable, searchable, audited, and rolled up", async () => {
+  const now = "2026-08-18T08:00:00.000Z" as never;
+  const eventId =
+    `evt_21J0A1B2C3D4E5F6G7H8${suffix.slice(0, 6).toUpperCase()}` as never;
+  const deliveryId =
+    `dlv_21J0A1B2C3D4E5F6G7H8${suffix.slice(0, 6).toUpperCase()}` as never;
+  const destinationId =
+    `dst_21J0A1B2C3D4E5F6G7H8${suffix.slice(0, 6).toUpperCase()}` as never;
+  const partnerId =
+    `ptr_21J0A1B2C3D4E5F6G7H8${suffix.slice(0, 6).toUpperCase()}` as never;
+  const transformationId =
+    `trf_21J0A1B2C3D4E5F6G7H8${suffix.slice(0, 6).toUpperCase()}` as never;
+  const event: CanonicalEvent = {
+    eventId,
+    tenantId: tenantA,
+    producerClientId: "cli_01J0A1B2C3D4E5F6G7H8J9K0MN" as never,
+    correlationId:
+      `cor_21J0A1B2C3D4E5F6G7H8${suffix.slice(0, 6).toUpperCase()}` as never,
+    eventType: "shipment.status_changed",
+    occurredAt: now,
+    acceptedAt: now,
+    subject: { type: "shipment", id: "replay" },
+    data: { trackingNumber: "T-1" },
+    metadata: {},
+    payloadHash: "event-hash",
+    status: "failed",
+    outcome: {
+      routingComplete: true,
+      totalDeliveries: 1,
+      terminalDeliveries: 1,
+      successfulDeliveries: 0,
+      failedTerminalDeliveries: 1,
+      deadLetteredDeliveries: 0,
+    },
+    version: 3,
+    expiresAt: "2026-09-18T08:00:00.000Z" as never,
+  };
+  const destination: Destination = {
+    destinationId,
+    tenantId: tenantA,
+    partnerId,
+    name: "Replay destination",
+    externalKey: "replay-destination" as never,
+    baseUrl: "https://example.test",
+    path: "/hook",
+    method: "POST",
+    enabled: true,
+    authType: "api_key",
+    authConfiguration: { idempotencyHeader: "Idempotency-Key" },
+    secretReferences: [{ name: "replay-secret" }],
+    timeoutMs: 1_000,
+    retryPolicy: {
+      maxAttempts: 2,
+      initialDelaySeconds: 1,
+      multiplier: 2,
+      maxDelaySeconds: 5,
+      jitter: "FULL_UPPER_HALF",
+    },
+    rateLimitPolicy: {
+      requestsPerInterval: 1,
+      intervalSeconds: 1,
+      burstCapacity: 1,
+      safetyFactor: 1,
+    },
+    circuitBreakerPolicy: {
+      failureThreshold: 2,
+      cooldownSeconds: 1,
+      probeLeaseSeconds: 1,
+    },
+    transformationId,
+    activeTransformationVersion: 2,
+    sensitiveResponseJsonPaths: ["$.secret"],
+    version: 7,
+  };
+  const original: DeliveryExecution = {
+    deliveryId,
+    eventId,
+    correlationId: event.correlationId,
+    tenantId: tenantA,
+    partnerId,
+    destinationId,
+    executionType: "ORIGINAL",
+    state: "failed_terminal",
+    blockedReason: "OAUTH_TOKEN_ERROR",
+    lastFailureCategory: "OAUTH_TOKEN_ERROR",
+    attemptCount: 1,
+    maxAttempts: 2,
+    configSnapshot: {
+      destinationVersion: 6,
+      url: "https://old.example.test/hook",
+      method: "POST",
+      timeoutMs: 1_000,
+      retryPolicy: destination.retryPolicy,
+      rateLimitPolicyId: "old-rate",
+      circuitBreakerPolicyId: "old-circuit",
+      authType: "api_key",
+      authConfiguration: {},
+      secretReferenceNames: ["old-secret"],
+      transformationId,
+      transformationVersion: 1,
+      redactionPaths: ["$.secret"],
+    },
+    transformedPayload: { secret: "old" },
+    transformedPayloadHash: "old-hash",
+    partnerIdempotencyKey: "old-key",
+    createdAt: now,
+    updatedAt: now,
+    terminalAt: now,
+    version: 5,
+    expiresAt: event.expiresAt,
+  };
+  const transformation: TransformationVersion = {
+    transformationId,
+    externalKey: "replay-transform" as never,
+    tenantId: tenantA,
+    version: 2,
+    definition: {},
+    createdAt: now,
+    createdBy: "admin",
+  };
+  const partner: Partner = {
+    partnerId,
+    tenantId: tenantA,
+    name: "Replay partner",
+    externalKey: "replay-partner" as never,
+    enabled: true,
+    createdAt: now,
+    updatedAt: now,
+    version: 1,
+  };
+  await persistence.putSeed([
+    {
+      ...key.event(tenantA, eventId),
+      entityType: "EVENT",
+      ...event,
+      expiresAt: epochSeconds(event.expiresAt),
+    },
+    {
+      ...key.lookup(tenantA, "DELIVERY", deliveryId),
+      entityType: "LOOKUP",
+      eventId,
+    },
+    {
+      ...key.lookup(tenantA, "CORRELATION", event.correlationId),
+      entityType: "LOOKUP",
+      eventId,
+    },
+    {
+      ...key.delivery(tenantA, eventId, deliveryId),
+      entityType: "DELIVERY",
+      ...original,
+      expiresAt: epochSeconds(original.expiresAt),
+    },
+    {
+      ...key.destination(tenantA, destinationId),
+      entityType: "DESTINATION",
+      ...destination,
+    },
+    { ...key.partner(tenantA, partnerId), entityType: "PARTNER", ...partner },
+    {
+      ...key.transformation(tenantA, transformationId, 2),
+      entityType: "TRANSFORMATION_VERSION",
+      ...transformation,
+    },
+  ]);
+  const operator = {
+    ...context(tenantA),
+    actorType: "console_user" as const,
+    actorId: "operator",
+    role: "operator" as const,
+  };
+  const replay = new ReplayService({
+    core: persistence,
+    repository: persistence,
+    execute: () => ({
+      output: { secret: "new", replay: true },
+      hash: "new-hash",
+    }),
+    ids: { next: (prefix) => `${prefix}_01J0A1B2C3D4E5F6G7H8J9K0MN` },
+    clock: { now: () => new Date(now) },
+    retentionDays: 30,
+  });
+  const input = {
+    deliveryId,
+    idempotencyKey: `replay-${suffix}`,
+    reason: "OAuth credentials were corrected",
+    correctionConfirmed: true,
+  };
+  const results = await Promise.all([
+    replay.replay(operator, input),
+    replay.replay(operator, input),
+  ]);
+  expect(results.filter((value) => !value.previouslyAccepted)).toHaveLength(1);
+  expect(results.filter((value) => value.previouslyAccepted)).toHaveLength(1);
+  await expect(persistence.getEvent(operator, eventId)).resolves.toMatchObject({
+    status: "failed",
+    outcome: event.outcome,
+    version: 3,
+  });
+  const detail = await persistence.getDeliveryDetail(operator, deliveryId);
+  expect(detail?.replayRelations).toHaveLength(1);
+  expect(detail?.replayRelations[0]).toMatchObject({
+    originalDestinationVersion: 6,
+    replayDestinationVersion: 7,
+    originalTransformationVersion: 1,
+    replayTransformationVersion: 2,
+  });
+  await expect(
+    persistence.searchDeliveries(operator, {
+      limit: 10,
+      from: "2026-08-18T00:00:00.000Z",
+      to: "2026-08-19T00:00:00.000Z",
+      correlationId: event.correlationId,
+    }),
+  ).resolves.toMatchObject({
+    items: expect.arrayContaining([expect.objectContaining({ deliveryId })]),
+  });
+  await expect(
+    persistence.listAudit(operator, {
+      limit: 10,
+      from: "2026-08-18T00:00:00.000Z",
+      to: "2026-08-19T00:00:00.000Z",
+      status: "delivery.replay_requested",
+    }),
+  ).resolves.toMatchObject({
+    items: [expect.objectContaining({ targetId: deliveryId })],
+  });
+  await expect(
+    persistence.getRollups(operator, {
+      from: "2026-08-18T08:00:00.000Z",
+      to: "2026-08-18T08:00:00.000Z",
+    }),
+  ).resolves.toEqual(
+    expect.arrayContaining([expect.objectContaining({ replaysRequested: 1 })]),
+  );
 });

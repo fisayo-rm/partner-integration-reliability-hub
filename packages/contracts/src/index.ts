@@ -405,6 +405,90 @@ export type PaginationCursorPayload = z.infer<
   typeof paginationCursorPayloadSchema
 >;
 
+export const replayRequestSchema = z
+  .object({
+    reason: z.string().trim().min(10).max(1_000),
+    correctionConfirmed: z.boolean().optional(),
+  })
+  .strict();
+export type ReplayRequest = z.infer<typeof replayRequestSchema>;
+export const replayResponseSchema = z
+  .object({
+    replayId: identifier("rpl"),
+    deliveryId: identifier("dlv"),
+    originalDeliveryId: identifier("dlv"),
+    state: z.literal("scheduled"),
+    previouslyAccepted: z.boolean(),
+  })
+  .strict();
+export type ReplayResponse = z.infer<typeof replayResponseSchema>;
+
+const paginationQuery = z.object({
+  limit: z.coerce.number().int().min(1).max(100).default(25),
+  cursor: z.string().min(1).optional(),
+});
+const searchDates = {
+  from: isoInstant.optional(),
+  to: isoInstant.optional(),
+};
+export const eventSearchQuerySchema = paginationQuery
+  .extend({
+    eventId: identifier("evt").optional(),
+    correlationId: identifier("cor").optional(),
+    idempotencyKey: z.string().min(1).max(256).optional(),
+    eventType: z.string().min(1).max(128).optional(),
+    status: z
+      .enum([
+        "accepted",
+        "processing",
+        "partially_succeeded",
+        "succeeded",
+        "failed",
+        "no_destinations",
+      ])
+      .optional(),
+    ...searchDates,
+  })
+  .strict();
+export const deliverySearchQuerySchema = paginationQuery
+  .extend({
+    deliveryId: identifier("dlv").optional(),
+    correlationId: identifier("cor").optional(),
+    partnerId: identifier("ptr").optional(),
+    destinationId: identifier("dst").optional(),
+    status: z
+      .enum([
+        "pending",
+        "scheduled",
+        "rate_limited",
+        "in_progress",
+        "retry_scheduled",
+        "succeeded",
+        "failed_terminal",
+        "dead_lettered",
+        "cancelled",
+      ])
+      .optional(),
+    terminalFailure: z.coerce.boolean().optional(),
+    ...searchDates,
+  })
+  .strict();
+export const auditSearchQuerySchema = paginationQuery
+  .extend({
+    action: z.string().min(1).max(128).optional(),
+    actorId: z.string().min(1).max(256).optional(),
+    targetType: z.string().min(1).max(128).optional(),
+    targetId: z.string().min(1).max(256).optional(),
+    ...searchDates,
+  })
+  .strict();
+export const rollupQuerySchema = z
+  .object({
+    from: isoInstant.optional(),
+    to: isoInstant.optional(),
+  })
+  .strict();
+
 export const apiMetaSchema = z
   .object({
     service: z.literal("partner-integration-reliability-hub"),

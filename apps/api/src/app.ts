@@ -1,6 +1,9 @@
 import swagger from "@fastify/swagger";
-import Fastify, { type FastifyInstance } from "fastify";
-import { createHmac, timingSafeEqual } from "node:crypto";
+import Fastify, {
+  type FastifyInstance,
+  type preHandlerHookHandler,
+} from "fastify";
+import { createHash, createHmac, timingSafeEqual } from "node:crypto";
 import {
   apiMetaSchema,
   canonicalEventRequestSchema,
@@ -12,12 +15,22 @@ import {
   updateDestinationRequestSchema,
   updatePartnerRequestSchema,
   validateTransformationRequestSchema,
+  replayRequestSchema,
+  replayResponseSchema,
+  eventSearchQuerySchema,
+  deliverySearchQuerySchema,
+  auditSearchQuerySchema,
+  rollupQuerySchema,
+  paginationCursorPayloadSchema,
   eventAcceptanceResponseSchema,
   eventStatusResponseSchema,
 } from "@pirh/contracts";
 import {
   ControlPlaneService,
   EventIngestionService,
+  ReplayService,
+  redactedJson,
+  type OperationsRepository,
   type ControlPlaneRepository,
   type CoreRepository,
 } from "@pirh/application";
@@ -59,6 +72,13 @@ export interface ApiDependencies {
     readonly repository: CoreRepository;
     readonly producerAuthenticator: ProducerAuthenticator;
   };
+  readonly operations?: {
+    readonly service: ReplayService;
+    readonly repository: OperationsRepository;
+    readonly consoleAuthenticator: ConsoleAuthenticator;
+    readonly cursorSecret: string;
+    readonly now?: () => Date;
+  };
   readonly requestId?: () => string;
 }
 
@@ -85,6 +105,89 @@ function page(request: { readonly query: unknown }, secret: string) {
     throw new Error("VALIDATION_ERROR");
   const value = decodeCursor(secret, input.cursor);
   return value === undefined ? { limit } : { limit, cursor: value };
+}
+function operationPage(input: {
+  readonly query: Record<string, unknown>;
+  readonly secret: string;
+  readonly tenantId: TenantContext["tenantId"];
+  readonly endpoint: string;
+  readonly now: Date;
+}) {
+  const limit = Number(input.query.limit ?? 25);
+  const from =
+    typeof input.query.from === "string"
+      ? input.query.from
+      : new Date(input.now.getTime() - 24 * 3_600_000).toISOString();
+  const to =
+    typeof input.query.to === "string"
+      ? input.query.to
+      : input.now.toISOString();
+  if (
+    !Number.isInteger(limit) ||
+    limit < 1 ||
+    limit > 100 ||
+    !Number.isFinite(Date.parse(from)) ||
+    !Number.isFinite(Date.parse(to)) ||
+    Date.parse(to) < Date.parse(from) ||
+    Date.parse(to) - Date.parse(from) > 30 * 86_400_000
+  )
+    throw new Error("VALIDATION_ERROR");
+  const normalized = JSON.stringify(
+    Object.fromEntries(
+      Object.entries({ ...input.query, from, to, cursor: undefined }).sort(
+        ([left], [right]) => left.localeCompare(right),
+      ),
+    ),
+  );
+  const endpointFingerprint = createHash("sha256")
+    .update(`${input.endpoint}\n${normalized}`)
+    .digest("hex");
+  const supplied = input.query.cursor;
+  if (supplied === undefined) return { limit, from, to, endpointFingerprint };
+  if (typeof supplied !== "string") throw new Error("INVALID_CURSOR");
+  let raw: string | undefined;
+  try {
+    raw = decodeCursor(input.secret, supplied);
+  } catch {
+    throw new Error("INVALID_CURSOR");
+  }
+  if (raw === undefined) throw new Error("INVALID_CURSOR");
+  let decoded: unknown;
+  try {
+    decoded = JSON.parse(raw);
+  } catch {
+    throw new Error("INVALID_CURSOR");
+  }
+  const parsed = paginationCursorPayloadSchema.safeParse(decoded);
+  if (
+    !parsed.success ||
+    parsed.data.tenantId !== input.tenantId ||
+    parsed.data.endpointFingerprint !== endpointFingerprint ||
+    Date.parse(parsed.data.expiresAt) <= input.now.getTime()
+  )
+    throw new Error("INVALID_CURSOR");
+  return {
+    limit,
+    from,
+    to,
+    endpointFingerprint,
+    cursor: JSON.stringify(parsed.data.lastEvaluatedKey),
+  };
+}
+function operationCursor(input: {
+  readonly secret: string;
+  readonly tenantId: TenantContext["tenantId"];
+  readonly endpointFingerprint: string;
+  readonly cursor: string;
+  readonly now: Date;
+}): string {
+  const value = JSON.stringify({
+    tenantId: input.tenantId,
+    endpointFingerprint: input.endpointFingerprint,
+    lastEvaluatedKey: JSON.parse(input.cursor),
+    expiresAt: new Date(input.now.getTime() + 15 * 60_000).toISOString(),
+  });
+  return cursor(input.secret, value);
 }
 function publicDestination(value: Destination) {
   const rest = { ...value } as Record<string, unknown>;
@@ -316,33 +419,36 @@ export async function buildApi(
         }
       },
     );
-    app.get(
-      "/api/v1/events/:eventId",
-      { preHandler: producerRead },
-      async (request, reply) => {
-        const event = await ingestion.repository.getEvent(
-          request.tenantContext as TenantContext,
-          (request.params as { eventId: never }).eventId,
-        );
-        if (event === undefined)
-          return reply.code(404).send({
-            error: {
-              code: "NOT_FOUND",
-              message: "Event not found.",
-              requestId: request.id,
-              correlationId: `cor_${request.id.slice(4)}`,
-            },
+    if (dependencies.operations === undefined)
+      app.get(
+        "/api/v1/events/:eventId",
+        { preHandler: producerRead },
+        async (request, reply) => {
+          const event = await ingestion.repository.getEvent(
+            request.tenantContext as TenantContext,
+            (request.params as { eventId: never }).eventId,
+          );
+          if (event === undefined)
+            return reply.code(404).send({
+              error: {
+                code: "NOT_FOUND",
+                message: "Event not found.",
+                requestId: request.id,
+                correlationId: `cor_${request.id.slice(4)}`,
+              },
+            });
+          const body = eventStatusResponseSchema.parse({
+            eventId: event.eventId,
+            correlationId: event.correlationId,
+            eventType: event.eventType,
+            acceptedAt: event.acceptedAt,
+            status: event.status,
           });
-        const body = eventStatusResponseSchema.parse({
-          eventId: event.eventId,
-          correlationId: event.correlationId,
-          eventType: event.eventType,
-          acceptedAt: event.acceptedAt,
-          status: event.status,
-        });
-        return reply.header("x-correlation-id", body.correlationId).send(body);
-      },
-    );
+          return reply
+            .header("x-correlation-id", body.correlationId)
+            .send(body);
+        },
+      );
   }
   const control = dependencies.controlPlane;
   if (control !== undefined) {
@@ -653,6 +759,351 @@ export async function buildApi(
             (request.params as { subscriptionId: never }).subscriptionId,
           );
           return reply.code(204).send();
+        }, reply),
+    );
+  }
+  const operations = dependencies.operations;
+  if (operations !== undefined) {
+    const authenticated = consoleAuthenticationHook(
+      operations.consoleAuthenticator,
+    );
+    const eventRead: preHandlerHookHandler = async (request) => {
+      const authorization = request.headers.authorization;
+      if (
+        typeof authorization === "string" &&
+        authorization.startsWith("Bearer ")
+      ) {
+        request.tenantContext =
+          await operations.consoleAuthenticator.authenticate(
+            authorization.slice("Bearer ".length),
+            request.id,
+            `cor_${request.id.slice(4)}` as TenantContext["correlationId"],
+          );
+        return;
+      }
+      const producer = dependencies.eventIngestion?.producerAuthenticator;
+      const clientId = request.headers["x-client-id"];
+      const timestamp = request.headers["x-timestamp"];
+      const nonce = request.headers["x-nonce"];
+      const signature = request.headers["x-signature"];
+      if (
+        producer !== undefined &&
+        typeof clientId === "string" &&
+        typeof timestamp === "string" &&
+        typeof nonce === "string" &&
+        typeof signature === "string"
+      ) {
+        request.tenantContext = await producer.authenticate({
+          method: request.method,
+          path: request.url.split("?", 1)[0] ?? request.url,
+          rawBody: request.rawBody ?? Buffer.alloc(0),
+          clientId: clientId as never,
+          timestamp,
+          nonce,
+          signature,
+          requiredScope: "events:read",
+          requestId: request.id,
+          correlationId:
+            `cor_${request.id.slice(4)}` as TenantContext["correlationId"],
+        });
+        return;
+      }
+      throw new AuthenticationError();
+    };
+    const operationContext = (request: { tenantContext?: TenantContext }) =>
+      request.tenantContext as TenantContext;
+    const now = () => operations.now?.() ?? new Date();
+    const mapOperation = async (
+      handler: () => Promise<unknown>,
+      reply: { code(code: number): { send(value: unknown): unknown } },
+    ) => {
+      try {
+        return await handler();
+      } catch (caught) {
+        const code =
+          caught instanceof Error ? caught.message : "VALIDATION_ERROR";
+        if (code === "NOT_FOUND")
+          return error(reply, 404, code, "Resource not found.");
+        if (code === "FORBIDDEN")
+          return error(reply, 403, code, "Permission denied.");
+        if (code === "IDEMPOTENCY_KEY_REUSED")
+          return error(
+            reply,
+            409,
+            code,
+            "The idempotency key was used with a different request.",
+          );
+        if (code.startsWith("REPLAY_"))
+          return error(reply, 409, code, "Delivery cannot be replayed.");
+        if (code === "INVALID_CURSOR")
+          return error(reply, 400, code, "The pagination cursor is invalid.");
+        return error(reply, 400, "VALIDATION_ERROR", "The request is invalid.");
+      }
+    };
+    const operationInput = (
+      request: { readonly query: unknown },
+      endpoint: string,
+      parsed: Record<string, unknown>,
+    ) => {
+      const current = operationContext(
+        request as { tenantContext?: TenantContext },
+      );
+      return operationPage({
+        query: parsed,
+        secret: operations.cursorSecret,
+        tenantId: current.tenantId,
+        endpoint,
+        now: now(),
+      });
+    };
+    const responseCursor = (
+      context: TenantContext,
+      endpointFingerprint: string,
+      value: string | undefined,
+    ) =>
+      value === undefined
+        ? undefined
+        : operationCursor({
+            secret: operations.cursorSecret,
+            tenantId: context.tenantId,
+            endpointFingerprint,
+            cursor: value,
+            now: now(),
+          });
+    app.get(
+      "/api/v1/events",
+      { preHandler: authenticated },
+      async (request, reply) =>
+        mapOperation(async () => {
+          const parsed = eventSearchQuerySchema.parse(request.query) as Record<
+            string,
+            unknown
+          >;
+          const page = operationInput(request, "events", parsed);
+          const exact = [
+            parsed.eventId,
+            parsed.correlationId,
+            parsed.idempotencyKey,
+          ].filter(Boolean);
+          if (exact.length > 1) throw new Error("VALIDATION_ERROR");
+          const result = await operations.repository.searchEvents(
+            operationContext(request),
+            {
+              ...page,
+              eventId: parsed.eventId as never,
+              correlationId: parsed.correlationId as never,
+              idempotencyKeyHash:
+                typeof parsed.idempotencyKey === "string"
+                  ? createHash("sha256")
+                      .update(parsed.idempotencyKey)
+                      .digest("hex")
+                  : undefined,
+              eventType: parsed.eventType as string | undefined,
+              status: parsed.status as string | undefined,
+            },
+          );
+          const cursor = responseCursor(
+            operationContext(request),
+            page.endpointFingerprint,
+            result.cursor,
+          );
+          return {
+            items: result.items,
+            ...(cursor === undefined ? {} : { cursor }),
+          };
+        }, reply),
+    );
+    app.get(
+      "/api/v1/events/:eventId",
+      { preHandler: eventRead },
+      async (request, reply) =>
+        mapOperation(async () => {
+          const detail = await operations.repository.getEventDetail(
+            operationContext(request),
+            (request.params as { eventId: never }).eventId,
+          );
+          if (detail === undefined) throw new Error("NOT_FOUND");
+          if (operationContext(request).actorType === "api_client")
+            return eventStatusResponseSchema.parse({
+              eventId: detail.event.eventId,
+              correlationId: detail.event.correlationId,
+              eventType: detail.event.eventType,
+              acceptedAt: detail.event.acceptedAt,
+              status: detail.event.status,
+            });
+          return detail;
+        }, reply),
+    );
+    app.get(
+      "/api/v1/deliveries",
+      { preHandler: authenticated },
+      async (request, reply) =>
+        mapOperation(async () => {
+          const parsed = deliverySearchQuerySchema.parse(
+            request.query,
+          ) as Record<string, unknown>;
+          const page = operationInput(request, "deliveries", parsed);
+          const exact = [parsed.deliveryId, parsed.correlationId].filter(
+            Boolean,
+          );
+          if (exact.length > 1) throw new Error("VALIDATION_ERROR");
+          const result = await operations.repository.searchDeliveries(
+            operationContext(request),
+            {
+              ...page,
+              deliveryId: parsed.deliveryId as never,
+              correlationId: parsed.correlationId as never,
+              partnerId: parsed.partnerId as string | undefined,
+              destinationId: parsed.destinationId as string | undefined,
+              status: parsed.status as string | undefined,
+              terminalFailure: parsed.terminalFailure as boolean | undefined,
+            },
+          );
+          const cursor = responseCursor(
+            operationContext(request),
+            page.endpointFingerprint,
+            result.cursor,
+          );
+          return {
+            items: result.items,
+            ...(cursor === undefined ? {} : { cursor }),
+          };
+        }, reply),
+    );
+    app.get(
+      "/api/v1/deliveries/:deliveryId",
+      { preHandler: authenticated },
+      async (request, reply) =>
+        mapOperation(async () => {
+          const detail = await operations.repository.getDeliveryDetail(
+            operationContext(request),
+            (request.params as { deliveryId: never }).deliveryId,
+          );
+          if (detail === undefined) throw new Error("NOT_FOUND");
+          return {
+            ...detail,
+            delivery: {
+              ...detail.delivery,
+              transformedPayload: redactedJson(
+                detail.delivery.transformedPayload,
+                detail.delivery.configSnapshot.redactionPaths,
+              ),
+              configSnapshot: {
+                ...detail.delivery.configSnapshot,
+                secretReferenceNames: [],
+                authConfiguration: {},
+              },
+            },
+          };
+        }, reply),
+    );
+    app.post(
+      "/api/v1/deliveries/:deliveryId/replays",
+      { preHandler: authenticated },
+      async (request, reply) =>
+        mapOperation(async () => {
+          const key = request.headers["idempotency-key"];
+          if (typeof key !== "string" || key.length < 1 || key.length > 256)
+            throw new Error("VALIDATION_ERROR");
+          const body = replayRequestSchema.parse(request.body);
+          const result = replayResponseSchema.parse(
+            await operations.service.replay(operationContext(request), {
+              deliveryId: (request.params as { deliveryId: never }).deliveryId,
+              idempotencyKey: key,
+              reason: body.reason,
+              correctionConfirmed: body.correctionConfirmed ?? false,
+            }),
+          );
+          return reply.code(result.previouslyAccepted ? 200 : 202).send(result);
+        }, reply),
+    );
+    app.get(
+      "/api/v1/audit-logs",
+      { preHandler: authenticated },
+      async (request, reply) =>
+        mapOperation(async () => {
+          const parsed = auditSearchQuerySchema.parse(request.query) as Record<
+            string,
+            unknown
+          >;
+          const page = operationInput(request, "audit-logs", parsed);
+          const result = await operations.repository.listAudit(
+            operationContext(request),
+            {
+              ...page,
+              status: parsed.action as string | undefined,
+              partnerId: parsed.actorId as string | undefined,
+              destinationId: parsed.targetType as string | undefined,
+              eventType: parsed.targetId as string | undefined,
+            },
+          );
+          const cursor = responseCursor(
+            operationContext(request),
+            page.endpointFingerprint,
+            result.cursor,
+          );
+          return {
+            items: result.items,
+            ...(cursor === undefined ? {} : { cursor }),
+          };
+        }, reply),
+    );
+    app.get(
+      "/api/v1/operational-rollups",
+      { preHandler: authenticated },
+      async (request, reply) =>
+        mapOperation(async () => {
+          const parsed = rollupQuerySchema.parse(request.query) as Record<
+            string,
+            unknown
+          >;
+          const page = operationInput(request, "operational-rollups", {
+            ...parsed,
+            limit: 1,
+          });
+          const rollups = await operations.repository.getRollups(
+            operationContext(request),
+            page,
+          );
+          const addRollup = (
+            target: Record<string, number>,
+            value: (typeof rollups)[number],
+          ) => {
+            for (const [name, amount] of Object.entries(value))
+              if (typeof amount === "number")
+                target[name] = (target[name] ?? 0) + amount;
+            for (const [bucket, amount] of Object.entries(value.latencyBuckets))
+              target[`latencyBucket${bucket}`] =
+                (target[`latencyBucket${bucket}`] ?? 0) + amount;
+          };
+          const totals: Record<string, number> = {};
+          const destinations = new Map<string, Record<string, number>>();
+          for (const value of rollups) {
+            if (value.destinationId !== undefined) {
+              const destination = destinations.get(value.destinationId) ?? {};
+              addRollup(destination, value);
+              destinations.set(value.destinationId, destination);
+            } else addRollup(totals, value);
+          }
+          return {
+            from: page.from,
+            to: page.to,
+            totals,
+            averageLatencyMs:
+              (totals.latencyCount ?? 0) === 0
+                ? 0
+                : (totals.latencyTotalMs ?? 0) / (totals.latencyCount ?? 1),
+            destinations: [...destinations.entries()].map(
+              ([destinationId, totals]) => ({
+                destinationId,
+                totals,
+                averageLatencyMs:
+                  (totals.latencyCount ?? 0) === 0
+                    ? 0
+                    : (totals.latencyTotalMs ?? 0) / (totals.latencyCount ?? 1),
+              }),
+            ),
+          };
         }, reply),
     );
   }

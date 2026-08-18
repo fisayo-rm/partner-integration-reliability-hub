@@ -20,6 +20,8 @@ import type {
   EventId,
   OutboxRecord,
   Partner,
+  ReplayRelation,
+  OperationalRollup,
   Subscription,
   Tenant,
   TenantContext,
@@ -39,6 +41,10 @@ import type {
   OutboxRepository,
   RoutingRepository,
   TenantRepository,
+  OperationsRepository,
+  EventDetail,
+  DeliveryDetail,
+  OperationalSearchInput,
 } from "@pirh/application";
 import {
   deriveEventStatus,
@@ -121,6 +127,80 @@ function deliveryIndexCategories(
     `STATUS#${delivery.state}`,
     `PARTNER#${delivery.partnerId}`,
     `DESTINATION#${delivery.destinationId}`,
+    ...(delivery.state === "dead_lettered" ||
+    delivery.state === "failed_terminal"
+      ? ["TERMINAL_FAILURE"]
+      : []),
+  ];
+}
+function hourOf(value: string): string {
+  return value.slice(0, 13).replace(/[-:T]/g, "");
+}
+function rollupUpdates(input: {
+  readonly tableName: string;
+  readonly tenantId: TenantContext["tenantId"];
+  readonly destinationId: string;
+  readonly stableId: string;
+  readonly at: string;
+  readonly attempt: DeliveryAttempt;
+  readonly delivery: DeliveryExecution;
+}): readonly unknown[] {
+  const duration = input.attempt.durationMs ?? 0;
+  const bucket =
+    duration <= 100
+      ? "latencyLe100"
+      : duration <= 250
+        ? "latencyLe250"
+        : duration <= 500
+          ? "latencyLe500"
+          : duration <= 1_000
+            ? "latencyLe1000"
+            : duration <= 2_500
+              ? "latencyLe2500"
+              : "latencyGt2500";
+  const values = {
+    ":attempt": 1,
+    ":success": input.attempt.outcome === "succeeded" ? 1 : 0,
+    ":failure": input.attempt.outcome === "failed" ? 1 : 0,
+    ":retry": input.delivery.state === "retry_scheduled" ? 1 : 0,
+    ":dead": input.delivery.state === "dead_lettered" ? 1 : 0,
+    ":replaySuccess":
+      input.delivery.executionType === "REPLAY" &&
+      input.delivery.state === "succeeded"
+        ? 1
+        : 0,
+    ":replayFailure":
+      input.delivery.executionType === "REPLAY" &&
+      (input.delivery.state === "dead_lettered" ||
+        input.delivery.state === "failed_terminal")
+        ? 1
+        : 0,
+    ":latency": duration,
+    ":latencyCount": 1,
+    ":bucket": 1,
+  };
+  const expression =
+    `ADD deliveryAttempts :attempt, deliverySuccesses :success, deliveryFailures :failure, ` +
+    `retriesScheduled :retry, deadLetters :dead, replaySuccesses :replaySuccess, ` +
+    `replayFailures :replayFailure, latencyTotalMs :latency, latencyCount :latencyCount, ${bucket} :bucket`;
+  const hour = hourOf(input.at);
+  return [
+    {
+      Update: {
+        TableName: input.tableName,
+        Key: key.rollup(input.tenantId, hour, stableShard(input.stableId, 8)),
+        UpdateExpression: expression,
+        ExpressionAttributeValues: values,
+      },
+    },
+    {
+      Update: {
+        TableName: input.tableName,
+        Key: key.destinationRollup(input.tenantId, hour, input.destinationId),
+        UpdateExpression: expression,
+        ExpressionAttributeValues: values,
+      },
+    },
   ];
 }
 
@@ -136,7 +216,8 @@ export class DynamoPersistence
     EventAcceptanceWriter,
     DeliveryConcurrencyRepository,
     RoutingRepository,
-    ControlPlaneRepository
+    ControlPlaneRepository,
+    OperationsRepository
 {
   public constructor(
     private readonly client: DynamoDBDocumentClient,
@@ -303,6 +384,507 @@ export class DynamoPersistence
     return result.LastEvaluatedKey === undefined
       ? { items }
       : { items, cursor: JSON.stringify(result.LastEvaluatedKey) };
+  }
+  private cursor(value: Item | undefined): string | undefined {
+    return value === undefined ? undefined : JSON.stringify(value);
+  }
+  private async indexedItems(
+    partition: string,
+    input: OperationalSearchInput,
+  ): Promise<{ readonly items: readonly Item[]; readonly cursor?: string }> {
+    const result = await this.client.send(
+      new QueryCommand({
+        TableName: this.config.coreTableName,
+        KeyConditionExpression: "PK = :pk AND SK BETWEEN :from AND :to",
+        ExpressionAttributeValues: {
+          ":pk": partition,
+          ":from": input.from,
+          ":to": `${input.to}\uffff`,
+        },
+        Limit: input.limit,
+        ScanIndexForward: false,
+        ExclusiveStartKey:
+          input.cursor === undefined ? undefined : JSON.parse(input.cursor),
+      }),
+    );
+    const cursor = this.cursor(result.LastEvaluatedKey as Item | undefined);
+    return {
+      items: (result.Items ?? []).filter((value) => !isExpired(value)),
+      ...(cursor === undefined ? {} : { cursor }),
+    };
+  }
+  public async searchEvents(
+    context: TenantContext,
+    input: OperationalSearchInput,
+  ): Promise<{
+    readonly items: readonly CanonicalEvent[];
+    readonly cursor?: string;
+  }> {
+    const directId = input.eventId;
+    if (directId !== undefined) {
+      const value = await this.getEvent(context, directId);
+      return { items: value === undefined ? [] : [value] };
+    }
+    if (input.correlationId !== undefined) {
+      const pointer = await this.getCore<{ readonly eventId: EventId }>(
+        key.lookup(context.tenantId, "CORRELATION", input.correlationId),
+      );
+      const value =
+        pointer === undefined
+          ? undefined
+          : await this.getEvent(context, pointer.eventId);
+      return { items: value === undefined ? [] : [value] };
+    }
+    const category =
+      input.idempotencyKeyHash === undefined
+        ? input.status === undefined
+          ? input.eventType === undefined
+            ? "ALL"
+            : `TYPE#${input.eventType}`
+          : `STATUS#${input.status}`
+        : `IDEMPOTENCY#${input.idempotencyKeyHash}`;
+    const indexed = await this.indexedItems(
+      `TENANT#${context.tenantId}#EVENT_INDEX#${category}`,
+      input,
+    );
+    const values = await Promise.all(
+      indexed.items.map((value) =>
+        this.getEvent(context, value.eventId as EventId),
+      ),
+    );
+    return {
+      items: values.filter(
+        (value): value is CanonicalEvent =>
+          value !== undefined &&
+          (input.status === undefined || value.status === input.status) &&
+          (input.eventType === undefined ||
+            value.eventType === input.eventType),
+      ),
+      ...(indexed.cursor === undefined ? {} : { cursor: indexed.cursor }),
+    };
+  }
+  public async searchDeliveries(
+    context: TenantContext,
+    input: OperationalSearchInput,
+  ): Promise<{
+    readonly items: readonly DeliveryExecution[];
+    readonly cursor?: string;
+  }> {
+    if (input.deliveryId !== undefined) {
+      const value = await this.getDelivery(context, input.deliveryId);
+      return { items: value === undefined ? [] : [value] };
+    }
+    if (input.correlationId !== undefined) {
+      const pointer = await this.getCore<{ readonly eventId: EventId }>(
+        key.lookup(context.tenantId, "CORRELATION", input.correlationId),
+      );
+      if (pointer === undefined) return { items: [] };
+      const detail = await this.getEventDetail(context, pointer.eventId);
+      return {
+        items: (detail?.deliveries ?? []).filter(
+          (value) =>
+            (input.status === undefined || value.state === input.status) &&
+            (input.partnerId === undefined ||
+              value.partnerId === input.partnerId) &&
+            (input.destinationId === undefined ||
+              value.destinationId === input.destinationId) &&
+            (!input.terminalFailure ||
+              value.state === "dead_lettered" ||
+              value.state === "failed_terminal"),
+        ),
+      };
+    }
+    const category = input.terminalFailure
+      ? "TERMINAL_FAILURE"
+      : input.status !== undefined
+        ? `STATUS#${input.status}`
+        : input.partnerId !== undefined
+          ? `PARTNER#${input.partnerId}`
+          : input.destinationId !== undefined
+            ? `DESTINATION#${input.destinationId}`
+            : "ALL";
+    const indexed = await this.indexedItems(
+      `TENANT#${context.tenantId}#DELIVERY_INDEX#${category}`,
+      input,
+    );
+    const values = await Promise.all(
+      indexed.items.map((value) =>
+        this.getDelivery(
+          context,
+          value.deliveryId as DeliveryExecution["deliveryId"],
+        ),
+      ),
+    );
+    return {
+      items: values.filter(
+        (value): value is DeliveryExecution =>
+          value !== undefined &&
+          (input.status === undefined || value.state === input.status) &&
+          (input.partnerId === undefined ||
+            value.partnerId === input.partnerId) &&
+          (input.destinationId === undefined ||
+            value.destinationId === input.destinationId) &&
+          (!input.terminalFailure ||
+            value.state === "dead_lettered" ||
+            value.state === "failed_terminal"),
+      ),
+      ...(indexed.cursor === undefined ? {} : { cursor: indexed.cursor }),
+    };
+  }
+  public async getEventDetail(
+    context: TenantContext,
+    eventId: EventId,
+  ): Promise<EventDetail | undefined> {
+    const result = await this.client.send(
+      new QueryCommand({
+        TableName: this.config.coreTableName,
+        KeyConditionExpression: "PK = :pk",
+        ExpressionAttributeValues: {
+          ":pk": `TENANT#${context.tenantId}#EVENT#${eventId}`,
+        },
+      }),
+    );
+    const values = (result.Items ?? []).filter((value) => !isExpired(value));
+    const event = values.find((value) => value.entityType === "EVENT") as
+      | CanonicalEvent
+      | undefined;
+    if (event === undefined) return undefined;
+    return {
+      event,
+      deliveries: values.filter(
+        (value) => value.entityType === "DELIVERY",
+      ) as DeliveryExecution[],
+      replayRelations: values.filter(
+        (value) => value.entityType === "REPLAY_RELATION",
+      ) as ReplayRelation[],
+    };
+  }
+  public async getDeliveryDetail(
+    context: TenantContext,
+    deliveryId: DeliveryExecution["deliveryId"],
+  ): Promise<DeliveryDetail | undefined> {
+    const delivery = await this.getDelivery(context, deliveryId);
+    if (delivery === undefined) return undefined;
+    const result = await this.client.send(
+      new QueryCommand({
+        TableName: this.config.coreTableName,
+        KeyConditionExpression: "PK = :pk AND begins_with(SK, :prefix)",
+        ExpressionAttributeValues: {
+          ":pk": `TENANT#${context.tenantId}#EVENT#${delivery.eventId}`,
+          ":prefix": `DELIVERY#${deliveryId}#`,
+        },
+      }),
+    );
+    const values = (result.Items ?? []).filter((value) => !isExpired(value));
+    const relations = await this.client.send(
+      new QueryCommand({
+        TableName: this.config.coreTableName,
+        KeyConditionExpression: "PK = :pk",
+        FilterExpression:
+          "originalDeliveryId = :delivery OR replayDeliveryId = :delivery",
+        ExpressionAttributeValues: {
+          ":pk": `TENANT#${context.tenantId}#EVENT#${delivery.eventId}`,
+          ":delivery": deliveryId,
+        },
+      }),
+    );
+    return {
+      delivery,
+      attempts: values.filter(
+        (value) => value.entityType === "DELIVERY_ATTEMPT",
+      ) as DeliveryAttempt[],
+      history: values.filter(
+        (value) => value.entityType === "DELIVERY_HISTORY",
+      ) as DeliveryHistoryEntry[],
+      replayRelations: (relations.Items ?? []).filter(
+        (value) => !isExpired(value) && value.entityType === "REPLAY_RELATION",
+      ) as ReplayRelation[],
+    };
+  }
+  public async listAudit(
+    context: TenantContext,
+    input: OperationalSearchInput,
+  ): Promise<{
+    readonly items: readonly AuditEvent[];
+    readonly cursor?: string;
+  }> {
+    const result = await this.client.send(
+      new QueryCommand({
+        TableName: this.config.auditTableName,
+        KeyConditionExpression: "PK = :pk AND SK BETWEEN :from AND :to",
+        ExpressionAttributeValues: {
+          ":pk": `TENANT#${context.tenantId}`,
+          ":from": input.from,
+          ":to": `${input.to}\uffff`,
+        },
+        Limit: input.limit,
+        ScanIndexForward: false,
+        ExclusiveStartKey:
+          input.cursor === undefined ? undefined : JSON.parse(input.cursor),
+      }),
+    );
+    return {
+      items: (result.Items ?? []).filter(
+        (value) =>
+          !isExpired(value) &&
+          (input.status === undefined || value.action === input.status) &&
+          (input.partnerId === undefined ||
+            value.actorId === input.partnerId) &&
+          (input.destinationId === undefined ||
+            value.targetType === input.destinationId) &&
+          (input.eventType === undefined || value.targetId === input.eventType),
+      ) as AuditEvent[],
+      ...(result.LastEvaluatedKey === undefined
+        ? {}
+        : { cursor: JSON.stringify(result.LastEvaluatedKey) }),
+    };
+  }
+  public async getRollups(
+    context: TenantContext,
+    input: { readonly from: string; readonly to: string },
+  ): Promise<readonly OperationalRollup[]> {
+    const start = new Date(input.from);
+    const end = new Date(input.to);
+    const hours: Date[] = [];
+    for (
+      let at = new Date(start);
+      at <= end;
+      at = new Date(at.getTime() + 3_600_000)
+    )
+      hours.push(at);
+    const values = await Promise.all(
+      hours.flatMap((at) => {
+        const hour = at.toISOString().slice(0, 13).replace(/[-:T]/g, "");
+        return Array.from({ length: 8 }, (_, shard) =>
+          this.getCore<OperationalRollup>(
+            key.rollup(context.tenantId, hour, shard),
+          ),
+        );
+      }),
+    );
+    const destinations = await Promise.all(
+      hours.map(async (at) => {
+        const hour = at.toISOString().slice(0, 13).replace(/[-:T]/g, "");
+        const result = await this.client.send(
+          new QueryCommand({
+            TableName: this.config.coreTableName,
+            KeyConditionExpression: "PK = :pk AND begins_with(SK, :prefix)",
+            ExpressionAttributeValues: {
+              ":pk": `TENANT#${context.tenantId}#ROLLUP#HOUR#${hour}`,
+              ":prefix": "DESTINATION#",
+            },
+          }),
+        );
+        return (result.Items ?? []).filter((value) => !isExpired(value));
+      }),
+    );
+    return [
+      ...values.filter(
+        (value): value is OperationalRollup => value !== undefined,
+      ),
+      ...(destinations.flat() as OperationalRollup[]),
+    ];
+  }
+  public async createReplay(
+    input: Parameters<OperationsRepository["createReplay"]>[0],
+  ): Promise<Awaited<ReturnType<OperationsRepository["createReplay"]>>> {
+    const guard = key.replayIdempotency(
+      input.context.tenantId,
+      input.idempotencyKeyHash,
+    );
+    const existing = await this.getCore<{
+      readonly requestHash: string;
+      readonly replayDeliveryId: DeliveryExecution["deliveryId"];
+      readonly replayId: ReplayRelation["replayId"];
+    }>(guard);
+    if (existing !== undefined) {
+      if (existing.requestHash !== input.requestHash)
+        return { kind: "conflict" };
+      const delivery = await this.getDelivery(
+        input.context,
+        existing.replayDeliveryId,
+      );
+      return delivery === undefined
+        ? { kind: "conflict" }
+        : { kind: "duplicate", delivery, replayId: existing.replayId };
+    }
+    const shard = stableShard(
+      input.outbox.outboxId,
+      this.config.outboxShardCount,
+    );
+    const hour = input.relation.requestedAt.slice(0, 13).replace(/[-:T]/g, "");
+    const transaction: unknown[] = [
+      {
+        Put: {
+          TableName: this.config.coreTableName,
+          Item: itemWithKeys(
+            {
+              ...input.delivery,
+              expiresAt: epochSeconds(input.delivery.expiresAt),
+            },
+            key.delivery(
+              input.context.tenantId,
+              input.delivery.eventId,
+              input.delivery.deliveryId,
+            ),
+            "DELIVERY",
+          ),
+          ConditionExpression: "attribute_not_exists(PK)",
+        },
+      },
+      {
+        Put: {
+          TableName: this.config.coreTableName,
+          Item: itemWithKeys(
+            { eventId: input.delivery.eventId },
+            key.lookup(
+              input.context.tenantId,
+              "DELIVERY",
+              input.delivery.deliveryId,
+            ),
+            "LOOKUP",
+          ),
+          ConditionExpression: "attribute_not_exists(PK)",
+        },
+      },
+      {
+        Put: {
+          TableName: this.config.coreTableName,
+          Item: itemWithKeys(
+            {
+              ...input.relation,
+              expiresAt: epochSeconds(input.relation.expiresAt),
+            },
+            key.replayRelation(
+              input.context.tenantId,
+              input.relation.eventId,
+              input.relation.originalDeliveryId,
+              input.relation.replayId,
+            ),
+            "REPLAY_RELATION",
+          ),
+          ConditionExpression: "attribute_not_exists(PK)",
+        },
+      },
+      {
+        Put: {
+          TableName: this.config.coreTableName,
+          Item: itemWithKeys(
+            {
+              ...input.history,
+              expiresAt: epochSeconds(input.history.expiresAt),
+            },
+            key.history(
+              input.context.tenantId,
+              input.delivery.eventId,
+              input.history.deliveryId,
+              input.history.occurredAt,
+              input.history.historyId,
+            ),
+            "DELIVERY_HISTORY",
+          ),
+          ConditionExpression: "attribute_not_exists(PK)",
+        },
+      },
+      ...deliveryIndexCategories(input.delivery).map((category) => ({
+        Put: {
+          TableName: this.config.coreTableName,
+          Item: deliveryIndexItem(input.delivery, category),
+          ConditionExpression: "attribute_not_exists(PK)",
+        },
+      })),
+      {
+        Put: {
+          TableName: this.config.coreTableName,
+          Item: itemWithKeys(
+            {
+              requestHash: input.requestHash,
+              replayDeliveryId: input.delivery.deliveryId,
+              replayId: input.relation.replayId,
+              expiresAt: epochSeconds(
+                new Date(
+                  new Date(input.relation.requestedAt).getTime() +
+                    7 * 86_400_000,
+                ),
+              ),
+            },
+            guard,
+            "REPLAY_IDEMPOTENCY",
+          ),
+          ConditionExpression: "attribute_not_exists(PK)",
+        },
+      },
+      {
+        Put: {
+          TableName: this.config.coreTableName,
+          Item: itemWithKeys(
+            {
+              ...input.outbox,
+              expiresAt: epochSeconds(
+                new Date(
+                  new Date(input.outbox.createdAt).getTime() + 7 * 86_400_000,
+                ),
+              ),
+              GSI1PK: `OUTBOX#UNPUBLISHED#${shard}`,
+              GSI1SK: `${input.outbox.createdAt}#${input.outbox.outboxId}`,
+            },
+            key.outbox(shard, input.outbox.createdAt, input.outbox.outboxId),
+            "OUTBOX",
+          ),
+          ConditionExpression: "attribute_not_exists(PK)",
+        },
+      },
+      this.auditPut(input.audit),
+      {
+        Update: {
+          TableName: this.config.coreTableName,
+          Key: key.rollup(
+            input.context.tenantId,
+            hour,
+            stableShard(input.delivery.deliveryId, 8),
+          ),
+          UpdateExpression: "ADD replaysRequested :one",
+          ExpressionAttributeValues: { ":one": 1 },
+        },
+      },
+      {
+        Update: {
+          TableName: this.config.coreTableName,
+          Key: key.destinationRollup(
+            input.context.tenantId,
+            hour,
+            input.delivery.destinationId,
+          ),
+          UpdateExpression: "ADD replaysRequested :one",
+          ExpressionAttributeValues: { ":one": 1 },
+        },
+      },
+    ];
+    try {
+      await this.client.send(
+        new TransactWriteCommand({ TransactItems: transaction as never }),
+      );
+      return {
+        kind: "created",
+        delivery: input.delivery,
+        replayId: input.relation.replayId,
+      };
+    } catch (error) {
+      if (!isConditionalFailure(error)) throw error;
+      const raced = await this.getCore<{
+        readonly requestHash: string;
+        readonly replayDeliveryId: DeliveryExecution["deliveryId"];
+        readonly replayId: ReplayRelation["replayId"];
+      }>(guard);
+      if (raced?.requestHash !== input.requestHash) return { kind: "conflict" };
+      const delivery = await this.getDelivery(
+        input.context,
+        raced.replayDeliveryId,
+      );
+      return delivery === undefined
+        ? { kind: "conflict" }
+        : { kind: "duplicate", delivery, replayId: raced.replayId };
+    }
   }
   private auditPut(event: AuditEvent) {
     return {
@@ -887,6 +1469,12 @@ export class DynamoPersistence
       input.event.acceptedAt,
       input.event.eventId,
     );
+    const eventIdempotencyIndex = key.eventIndex(
+      input.context.tenantId,
+      `IDEMPOTENCY#${input.idempotencyKeyHash}`,
+      input.event.acceptedAt,
+      input.event.eventId,
+    );
     const shard = stableShard(
       input.outbox.outboxId,
       this.config.outboxShardCount,
@@ -910,6 +1498,23 @@ export class DynamoPersistence
                   },
                   eventKey,
                   "EVENT",
+                ),
+                ConditionExpression: "attribute_not_exists(PK)",
+              },
+            },
+            {
+              Put: {
+                TableName: this.config.coreTableName,
+                Item: itemWithKeys(
+                  {
+                    eventId: input.event.eventId,
+                    eventType: input.event.eventType,
+                    status: input.event.status,
+                    acceptedAt: input.event.acceptedAt,
+                    expiresAt: epochSeconds(input.event.expiresAt),
+                  },
+                  eventIdempotencyIndex,
+                  "EVENT_INDEX",
                 ),
                 ConditionExpression: "attribute_not_exists(PK)",
               },
@@ -1020,6 +1625,18 @@ export class DynamoPersistence
                   "OUTBOX",
                 ),
                 ConditionExpression: "attribute_not_exists(PK)",
+              },
+            },
+            {
+              Update: {
+                TableName: this.config.coreTableName,
+                Key: key.rollup(
+                  input.context.tenantId,
+                  input.event.acceptedAt.slice(0, 13).replace(/[-:T]/g, ""),
+                  stableShard(input.event.eventId, 8),
+                ),
+                UpdateExpression: "ADD acceptedEvents :one",
+                ExpressionAttributeValues: { ":one": 1 },
               },
             },
           ],
@@ -1209,6 +1826,34 @@ export class DynamoPersistence
             ConditionExpression: "attribute_not_exists(PK)",
           },
         });
+      }
+      if (terminal) {
+        const hour = hourOf(input.delivery.updatedAt);
+        const values = {
+          ":failure": input.delivery.state === "failed_terminal" ? 1 : 0,
+          ":dead": input.delivery.state === "dead_lettered" ? 1 : 0,
+        };
+        for (const target of [
+          key.rollup(
+            input.context.tenantId,
+            hour,
+            stableShard(input.delivery.deliveryId, 8),
+          ),
+          key.destinationRollup(
+            input.context.tenantId,
+            hour,
+            input.delivery.destinationId,
+          ),
+        ])
+          transaction.push({
+            Update: {
+              TableName: this.config.coreTableName,
+              Key: target,
+              UpdateExpression:
+                "ADD deliveryFailures :failure, deadLetters :dead",
+              ExpressionAttributeValues: values,
+            },
+          });
       }
       try {
         await this.client.send(
@@ -1650,7 +2295,9 @@ export class DynamoPersistence
       const event = await this.getEvent(input.context, input.eventId);
       if (current === undefined || event === undefined) return false;
       const terminal = isTerminalDeliveryState(input.delivery.state);
-      const outcome = terminal
+      const updatesOriginalEvent =
+        terminal && input.delivery.executionType === "ORIGINAL";
+      const outcome = updatesOriginalEvent
         ? {
             ...event.outcome,
             terminalDeliveries: event.outcome.terminalDeliveries + 1,
@@ -1665,7 +2312,7 @@ export class DynamoPersistence
               (input.delivery.state === "dead_lettered" ? 1 : 0),
           }
         : event.outcome;
-      const updatedEvent: CanonicalEvent = terminal
+      const updatedEvent: CanonicalEvent = updatesOriginalEvent
         ? {
             ...event,
             outcome,
@@ -1760,7 +2407,7 @@ export class DynamoPersistence
           },
         })),
       ];
-      if (terminal) {
+      if (updatesOriginalEvent) {
         transaction.push({
           Put: {
             TableName: this.config.coreTableName,
@@ -1804,6 +2451,17 @@ export class DynamoPersistence
           },
         });
       }
+      transaction.push(
+        ...rollupUpdates({
+          tableName: this.config.coreTableName,
+          tenantId: input.context.tenantId,
+          destinationId: input.delivery.destinationId,
+          stableId: input.delivery.deliveryId,
+          at: input.attempt.completedAt ?? input.delivery.updatedAt,
+          attempt: input.attempt,
+          delivery: input.delivery,
+        }),
+      );
       if (input.circuit !== undefined) {
         transaction.push({
           Put: {

@@ -3,6 +3,7 @@ import {
   classifyDeliveryResult,
   isTerminalDeliveryState,
   parseRetryAfter,
+  replayEligibility,
   retryDelaySeconds,
   transitionDelivery,
 } from "@pirh/domain";
@@ -24,6 +25,9 @@ import type {
   JsonObject,
   OutboxRecord,
   Partner,
+  ReplayId,
+  ReplayRelation,
+  OperationalRollup,
   Subscription,
   TenantContext,
   Tenant,
@@ -34,7 +38,7 @@ import type {
 
 export interface Page<T> {
   readonly items: readonly T[];
-  readonly cursor?: string;
+  readonly cursor?: string | undefined;
 }
 
 export interface IdentityRepository {
@@ -147,6 +151,80 @@ export interface AuditRepository {
     readonly items: readonly AuditEvent[];
     readonly cursor?: string;
   }>;
+}
+export interface EventDetail {
+  readonly event: CanonicalEvent;
+  readonly deliveries: readonly DeliveryExecution[];
+  readonly replayRelations: readonly ReplayRelation[];
+}
+export interface DeliveryDetail {
+  readonly delivery: DeliveryExecution;
+  readonly attempts: readonly DeliveryAttempt[];
+  readonly history: readonly DeliveryHistoryEntry[];
+  readonly replayRelations: readonly ReplayRelation[];
+}
+export interface OperationalSearchInput {
+  readonly limit: number;
+  readonly cursor?: string | undefined;
+  readonly from: string;
+  readonly to: string;
+  readonly eventId?: EventId | undefined;
+  readonly deliveryId?: DeliveryExecution["deliveryId"] | undefined;
+  readonly correlationId?: CorrelationId | undefined;
+  readonly idempotencyKeyHash?: string | undefined;
+  readonly eventType?: string | undefined;
+  readonly status?: string | undefined;
+  readonly partnerId?: string | undefined;
+  readonly destinationId?: string | undefined;
+  readonly terminalFailure?: boolean | undefined;
+}
+export interface OperationsRepository {
+  searchEvents(
+    context: TenantContext,
+    input: OperationalSearchInput,
+  ): Promise<Page<CanonicalEvent>>;
+  searchDeliveries(
+    context: TenantContext,
+    input: OperationalSearchInput,
+  ): Promise<Page<DeliveryExecution>>;
+  getEventDetail(
+    context: TenantContext,
+    eventId: EventId,
+  ): Promise<EventDetail | undefined>;
+  getDeliveryDetail(
+    context: TenantContext,
+    deliveryId: DeliveryExecution["deliveryId"],
+  ): Promise<DeliveryDetail | undefined>;
+  listAudit(
+    context: TenantContext,
+    input: OperationalSearchInput,
+  ): Promise<Page<AuditEvent>>;
+  getRollups(
+    context: TenantContext,
+    input: { readonly from: string; readonly to: string },
+  ): Promise<readonly OperationalRollup[]>;
+  createReplay(input: {
+    readonly context: TenantContext;
+    readonly requestHash: string;
+    readonly idempotencyKeyHash: string;
+    readonly relation: ReplayRelation;
+    readonly delivery: DeliveryExecution;
+    readonly history: DeliveryHistoryEntry;
+    readonly outbox: OutboxRecord;
+    readonly audit: AuditEvent;
+  }): Promise<
+    | {
+        readonly kind: "created";
+        readonly delivery: DeliveryExecution;
+        readonly replayId: ReplayId;
+      }
+    | {
+        readonly kind: "duplicate";
+        readonly delivery: DeliveryExecution;
+        readonly replayId: ReplayId;
+      }
+    | { readonly kind: "conflict" }
+  >;
 }
 export interface OutboxRepository {
   getUnpublished(
@@ -1115,6 +1193,269 @@ export class RoutingService {
     }
     void created;
     await this.dependencies.repository.completeRouting(context, event.eventId);
+  }
+}
+
+export function redactedJson(
+  value: JsonObject,
+  paths: readonly string[],
+): JsonObject {
+  const result = JSON.parse(JSON.stringify(value)) as JsonObject;
+  for (const path of paths) {
+    const parts = path.replace(/^\$\./, "").split(".");
+    let target: Record<string, JsonObject[keyof JsonObject]> | undefined =
+      result;
+    for (const part of parts.slice(0, -1)) {
+      const next: unknown = target?.[part];
+      target =
+        next !== null && typeof next === "object" && !Array.isArray(next)
+          ? (next as Record<string, JsonObject[keyof JsonObject]>)
+          : undefined;
+    }
+    const final = parts.at(-1);
+    if (target !== undefined && final !== undefined && final in target)
+      target[final] = "[REDACTED]";
+  }
+  return result;
+}
+
+export interface ReplayDependencies {
+  readonly core: CoreRepository;
+  readonly repository: OperationsRepository;
+  readonly execute: (
+    definition: JsonObject,
+    event: JsonObject,
+  ) => {
+    readonly output: JsonObject;
+    readonly hash: string;
+  };
+  readonly ids: IdGenerator;
+  readonly clock: Clock;
+  readonly retentionDays: number;
+}
+export class ReplayService {
+  public constructor(private readonly dependencies: ReplayDependencies) {}
+  public async replay(
+    context: TenantContext,
+    input: {
+      readonly deliveryId: DeliveryExecution["deliveryId"];
+      readonly idempotencyKey: string;
+      readonly reason: string;
+      readonly correctionConfirmed: boolean;
+    },
+  ) {
+    if (
+      context.actorType !== "console_user" ||
+      (context.role !== "admin" && context.role !== "operator")
+    )
+      throw new Error("FORBIDDEN");
+    const original = await this.dependencies.core.getDelivery(
+      context,
+      input.deliveryId,
+    );
+    if (original === undefined) throw new Error("NOT_FOUND");
+    const eligibility = replayEligibility({
+      state: original.state,
+      ...(original.lastFailureCategory === undefined
+        ? {}
+        : { failureCategory: original.lastFailureCategory }),
+      correctionConfirmed: input.correctionConfirmed,
+    });
+    if (!eligibility.eligible) throw new Error("REPLAY_NOT_ELIGIBLE");
+    const event = await this.dependencies.core.getEvent(
+      context,
+      original.eventId,
+    );
+    const destination = await this.dependencies.core.getDestination(
+      context,
+      original.destinationId,
+    );
+    const partner =
+      destination === undefined
+        ? undefined
+        : await this.dependencies.core.getPartner(
+            context,
+            destination.partnerId,
+          );
+    const transformation =
+      destination === undefined
+        ? undefined
+        : await this.dependencies.core.getTransformationVersion(
+            context,
+            destination.transformationId,
+            destination.activeTransformationVersion,
+          );
+    if (
+      event === undefined ||
+      destination === undefined ||
+      !destination.enabled ||
+      partner === undefined ||
+      !partner.enabled ||
+      transformation === undefined
+    )
+      throw new Error("REPLAY_CONFIGURATION_UNAVAILABLE");
+    let transformed: { readonly output: JsonObject; readonly hash: string };
+    try {
+      transformed = this.dependencies.execute(
+        transformation.definition,
+        event as unknown as JsonObject,
+      );
+    } catch {
+      throw new Error("REPLAY_TRANSFORMATION_FAILED");
+    }
+    const now = this.dependencies.clock.now();
+    const at = now.toISOString() as DeliveryExecution["createdAt"];
+    const replayId = this.dependencies.ids.next("rpl") as ReplayId;
+    const deliveryId = this.dependencies.ids.next(
+      "dlv",
+    ) as DeliveryExecution["deliveryId"];
+    const snapshot = {
+      destinationVersion: destination.version,
+      url: new URL(destination.path, destination.baseUrl).toString(),
+      method: destination.method,
+      timeoutMs: destination.timeoutMs,
+      retryPolicy: destination.retryPolicy,
+      rateLimitPolicyId: `${destination.destinationId}:v${destination.version}`,
+      circuitBreakerPolicyId: `${destination.destinationId}:v${destination.version}`,
+      authType: destination.authType,
+      authConfiguration: destination.authConfiguration,
+      secretReferenceNames: destination.secretReferences.map(
+        (reference) => reference.name,
+      ),
+      transformationId: transformation.transformationId,
+      transformationVersion: transformation.version,
+      redactionPaths: destination.sensitiveResponseJsonPaths,
+      ...(typeof destination.authConfiguration.idempotencyHeader === "string"
+        ? { idempotencyHeader: destination.authConfiguration.idempotencyHeader }
+        : {}),
+    } as DeliveryExecution["configSnapshot"];
+    const expiresAt = new Date(
+      now.getTime() + this.dependencies.retentionDays * 86_400_000,
+    ).toISOString() as DeliveryExecution["expiresAt"];
+    const delivery: DeliveryExecution = {
+      deliveryId,
+      eventId: event.eventId,
+      correlationId: event.correlationId,
+      tenantId: event.tenantId,
+      partnerId: destination.partnerId,
+      destinationId: destination.destinationId,
+      executionType: "REPLAY",
+      originalDeliveryId: original.deliveryId,
+      replayId,
+      state: "scheduled",
+      attemptCount: 0,
+      maxAttempts: destination.retryPolicy.maxAttempts,
+      nextEligibleAt: at,
+      configSnapshot: snapshot,
+      transformedPayload: transformed.output,
+      transformedPayloadHash: transformed.hash,
+      partnerIdempotencyKey: createHash("sha256")
+        .update(
+          `${event.tenantId}\n${event.eventId}\n${destination.destinationId}\n${deliveryId}`,
+        )
+        .digest("base64url"),
+      createdAt: at,
+      updatedAt: at,
+      version: 1,
+      expiresAt,
+    };
+    const relation: ReplayRelation = {
+      replayId,
+      tenantId: context.tenantId,
+      eventId: event.eventId,
+      originalDeliveryId: original.deliveryId,
+      replayDeliveryId: deliveryId,
+      requestedAt: at,
+      requestedBy: context.actorId,
+      reason: input.reason,
+      correctionConfirmed: input.correctionConfirmed,
+      originalDestinationVersion: original.configSnapshot.destinationVersion,
+      originalTransformationId: original.configSnapshot.transformationId,
+      originalTransformationVersion:
+        original.configSnapshot.transformationVersion,
+      replayDestinationVersion: snapshot.destinationVersion,
+      replayTransformationId: snapshot.transformationId,
+      replayTransformationVersion: snapshot.transformationVersion,
+      expiresAt,
+    };
+    const requestHash = createHash("sha256")
+      .update(
+        `${original.deliveryId}\n${input.reason}\n${input.correctionConfirmed}`,
+      )
+      .digest("hex");
+    const idempotencyKeyHash = createHash("sha256")
+      .update(input.idempotencyKey)
+      .digest("hex");
+    const result = await this.dependencies.repository.createReplay({
+      context,
+      requestHash,
+      idempotencyKeyHash,
+      relation,
+      delivery,
+      history: {
+        historyId: this.dependencies.ids.next("req"),
+        deliveryId,
+        tenantId: context.tenantId,
+        correlationId: event.correlationId,
+        type: "replay_linked",
+        occurredAt: at,
+        summary: "Replay delivery created and scheduled.",
+        metadata: { originalDeliveryId: original.deliveryId, replayId },
+        expiresAt,
+      },
+      outbox: {
+        outboxId: this.dependencies.ids.next("obx") as OutboxRecord["outboxId"],
+        kind: "DELIVER",
+        tenantId: context.tenantId,
+        aggregateType: "DELIVERY",
+        aggregateId: deliveryId,
+        target: "DELIVERY_QUEUE",
+        payload: {
+          eventId: event.eventId,
+          deliveryId,
+          correlationId: event.correlationId,
+          cause: "REPLAY",
+        },
+        createdAt: at,
+        attempts: 0,
+        schemaVersion: 1,
+      },
+      audit: {
+        auditId: this.dependencies.ids.next("aud") as AuditEvent["auditId"],
+        tenantId: context.tenantId,
+        actorId: context.actorId,
+        actorRole: context.role,
+        action: "delivery.replay_requested",
+        targetType: "DELIVERY",
+        targetId: original.deliveryId,
+        requestId: context.requestId,
+        correlationId: event.correlationId,
+        reason: input.reason,
+        metadata: {
+          replayId,
+          replayDeliveryId: deliveryId,
+          correctionConfirmed: input.correctionConfirmed,
+          originalDestinationVersion:
+            original.configSnapshot.destinationVersion,
+          replayDestinationVersion: snapshot.destinationVersion,
+          originalTransformationVersion:
+            original.configSnapshot.transformationVersion,
+          replayTransformationVersion: snapshot.transformationVersion,
+        },
+        occurredAt: at,
+        expiresAt: new Date(
+          now.getTime() + 90 * 86_400_000,
+        ).toISOString() as never,
+      },
+    });
+    if (result.kind === "conflict") throw new Error("IDEMPOTENCY_KEY_REUSED");
+    return {
+      replayId: result.replayId,
+      deliveryId: result.delivery.deliveryId,
+      originalDeliveryId: original.deliveryId,
+      state: "scheduled" as const,
+      previouslyAccepted: result.kind === "duplicate",
+    };
   }
 }
 

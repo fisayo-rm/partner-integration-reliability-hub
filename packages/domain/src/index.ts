@@ -332,7 +332,7 @@ export interface DeliveryAttempt {
   readonly outcome: "started" | "succeeded" | "failed";
   readonly failureCategory?: FailureCategory;
   readonly retryable?: boolean;
-  readonly traceId?: string;
+  readonly traceId?: string | undefined;
   readonly expiresAt: IsoInstant;
 }
 export interface DeliveryHistoryEntry {
@@ -426,6 +426,8 @@ export interface OutboxRecord {
   readonly createdAt: IsoInstant;
   readonly attempts: number;
   readonly publishedAt?: IsoInstant;
+  /** W3C trace context carried out-of-band in queue message attributes. */
+  readonly traceparent?: string | undefined;
   readonly schemaVersion: 1;
 }
 export interface ScheduledDeliveryWork {
@@ -438,6 +440,7 @@ export interface ScheduledDeliveryWork {
   readonly cause: "RETRY" | "RESUME";
   readonly createdAt: IsoInstant;
   readonly publishedAt?: IsoInstant;
+  readonly traceparent?: string | undefined;
   readonly attempts: number;
   readonly expiresAt: IsoInstant;
   readonly schemaVersion: 1;

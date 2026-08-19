@@ -29,7 +29,17 @@ test("readiness is bounded by injected dependency probes", async () => {
     }),
   });
   try {
-    expect((await app.inject("/health/ready")).statusCode).toBe(503);
+    const response = await app.inject("/health/ready");
+    expect(response.statusCode).toBe(503);
+    expect(response.json()).toEqual({
+      status: "not_ready",
+      checks: [
+        { name: "configuration", status: "up" },
+        { name: "dynamodb", status: "up" },
+        { name: "elasticmq", status: "down" },
+      ],
+    });
+    expect(response.body).not.toContain("unreachable");
   } finally {
     await app.close();
   }

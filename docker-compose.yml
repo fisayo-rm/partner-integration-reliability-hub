@@ -130,6 +130,8 @@ services:
       OIDC_AUDIENCE: pirh-console
       LOCAL_SECRET_MASTER_KEY_B64: ${LOCAL_SECRET_MASTER_KEY_B64:-}
       LOCAL_CURSOR_SECRET: ${LOCAL_CURSOR_SECRET:-local-cursor-secret}
+      PIRH_OTLP_ENDPOINT: ${PIRH_OTLP_ENDPOINT:-}
+      LOG_LEVEL: ${LOG_LEVEL:-info}
     ports: ["3000:3000"]
     healthcheck:
       test:
@@ -166,6 +168,9 @@ services:
       AUDIT_TABLE_NAME: pirh-audit-local
       ROUTING_QUEUE_NAME: pirh-routing-local
       DELIVERY_QUEUE_NAME: pirh-delivery-local
+      APP_ENV: local
+      PIRH_OTLP_ENDPOINT: ${PIRH_OTLP_ENDPOINT:-}
+      LOG_LEVEL: ${LOG_LEVEL:-info}
   router-worker:
     image: pirh-m01-node:local
     build: *node-build
@@ -179,6 +184,9 @@ services:
       CORE_TABLE_NAME: pirh-core-local
       AUDIT_TABLE_NAME: pirh-audit-local
       ROUTING_QUEUE_NAME: pirh-routing-local
+      APP_ENV: local
+      PIRH_OTLP_ENDPOINT: ${PIRH_OTLP_ENDPOINT:-}
+      LOG_LEVEL: ${LOG_LEVEL:-info}
   delivery-worker:
     image: pirh-m01-node:local
     build: *node-build
@@ -196,6 +204,9 @@ services:
       AUDIT_TABLE_NAME: pirh-audit-local
       DELIVERY_QUEUE_NAME: pirh-delivery-local
       LOCAL_SECRET_MASTER_KEY_B64: ${LOCAL_SECRET_MASTER_KEY_B64:-}
+      APP_ENV: local
+      PIRH_OTLP_ENDPOINT: ${PIRH_OTLP_ENDPOINT:-}
+      LOG_LEVEL: ${LOG_LEVEL:-info}
   outbox-reconciler:
     image: pirh-m01-node:local
     build: *node-build
@@ -210,6 +221,9 @@ services:
       AUDIT_TABLE_NAME: pirh-audit-local
       ROUTING_QUEUE_NAME: pirh-routing-local
       DELIVERY_QUEUE_NAME: pirh-delivery-local
+      APP_ENV: local
+      PIRH_OTLP_ENDPOINT: ${PIRH_OTLP_ENDPOINT:-}
+      LOG_LEVEL: ${LOG_LEVEL:-info}
   mock-partner-alpha:
     image: pirh-m01-node:local
     build: *node-build
@@ -284,6 +298,7 @@ services:
   jaeger:
     image: jaegertracing/all-in-one:1.63.0
     profiles: ["observability"]
+    environment: { COLLECTOR_OTLP_ENABLED: "true" }
     ports: ["16686:16686"]
   grafana:
     image: grafana/grafana:11.3.0
@@ -293,6 +308,8 @@ services:
     volumes:
       [
         "./infrastructure/docker/observability/grafana-datasources.yaml:/etc/grafana/provisioning/datasources/datasources.yaml:ro",
+        "./infrastructure/docker/observability/grafana-dashboards.yaml:/etc/grafana/provisioning/dashboards/dashboards.yaml:ro",
+        "./infrastructure/docker/observability/dashboards:/var/lib/grafana/dashboards:ro",
         "grafana-data:/var/lib/grafana",
       ]
     ports: ["3001:3000"]

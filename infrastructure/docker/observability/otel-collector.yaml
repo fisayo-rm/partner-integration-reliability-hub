@@ -7,10 +7,17 @@ extensions:
   health_check:
     endpoint: 0.0.0.0:13133
 exporters:
+  otlp/jaeger:
+    endpoint: jaeger:4317
+    tls: { insecure: true }
+  prometheus:
+    endpoint: 0.0.0.0:9464
+  otlphttp/loki:
+    endpoint: http://loki:3100/otlp
   debug: {}
 service:
   extensions: [health_check]
   pipelines:
-    traces: { receivers: [otlp], exporters: [debug] }
-    metrics: { receivers: [otlp], exporters: [debug] }
-    logs: { receivers: [otlp], exporters: [debug] }
+    traces: { receivers: [otlp], exporters: [otlp/jaeger] }
+    metrics: { receivers: [otlp], exporters: [prometheus] }
+    logs: { receivers: [otlp], exporters: [otlphttp/loki] }

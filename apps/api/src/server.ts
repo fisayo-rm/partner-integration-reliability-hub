@@ -1,6 +1,7 @@
 import { buildApi, type HealthProbe } from "./app.js";
-import { DynamoDBClient } from "@aws-sdk/client-dynamodb";
+import { DescribeTableCommand, DynamoDBClient } from "@aws-sdk/client-dynamodb";
 import { DynamoDBDocumentClient } from "@aws-sdk/lib-dynamodb";
+import { GetQueueUrlCommand, SQSClient } from "@aws-sdk/client-sqs";
 import {
   ConsoleAuthenticator,
   OidcAccessTokenVerifier,
@@ -15,20 +16,24 @@ import { DynamoPersistence } from "@pirh/persistence";
 import { LocalDynamoDbSecretStore } from "@pirh/secrets";
 import { SafePartnerHttpClient } from "@pirh/partner-http";
 import { executeTransformation } from "@pirh/transformation";
+import { createTelemetryRuntime } from "@pirh/observability";
 
 const port = Number.parseInt(process.env.API_PORT ?? "3000", 10);
 const host = process.env.API_HOST ?? "0.0.0.0";
 const timeoutMs = 1_000;
-function httpProbe(name: string, url: string): HealthProbe {
+const runtime = createTelemetryRuntime({
+  service: "api",
+  environment: process.env.APP_ENV ?? "local",
+  otlpEndpoint: process.env.PIRH_OTLP_ENDPOINT,
+  logLevel: process.env.LOG_LEVEL,
+});
+function boundedProbe(name: string, action: () => Promise<void>): HealthProbe {
   return async () => {
     try {
-      const response = await fetch(url, {
-        signal: AbortSignal.timeout(timeoutMs),
-      });
+      await action();
       return {
         name,
-        ok: response.status < 500,
-        detail: `HTTP ${response.status}`,
+        ok: true,
       };
     } catch (error) {
       return {
@@ -57,6 +62,20 @@ const documentClient = DynamoDBDocumentClient.from(
     credentials: { accessKeyId: "local", secretAccessKey: "local" },
   }),
 );
+const dynamoClient = new DynamoDBClient({
+  region: process.env.AWS_REGION ?? "us-east-1",
+  ...(process.env.DYNAMODB_ENDPOINT === undefined
+    ? {}
+    : { endpoint: process.env.DYNAMODB_ENDPOINT }),
+  credentials: { accessKeyId: "local", secretAccessKey: "local" },
+});
+const sqsClient = new SQSClient({
+  region: process.env.AWS_REGION ?? "us-east-1",
+  ...(process.env.ELASTICMQ_ENDPOINT === undefined
+    ? {}
+    : { endpoint: process.env.ELASTICMQ_ENDPOINT }),
+  credentials: { accessKeyId: "local", secretAccessKey: "local" },
+});
 const persistence = new DynamoPersistence(documentClient, {
   coreTableName: process.env.CORE_TABLE_NAME ?? "pirh-core-local",
   auditTableName: process.env.AUDIT_TABLE_NAME ?? "pirh-audit-local",
@@ -106,14 +125,24 @@ const consoleAuthenticator = new ConsoleAuthenticator(
 );
 const app = await buildApi({
   requiredConfiguration,
-  dynamoDb: httpProbe(
-    "dynamodb",
-    process.env.DYNAMODB_ENDPOINT ?? "http://dynamodb-local:8000",
-  ),
-  elasticMq: httpProbe(
-    "elasticmq",
-    process.env.ELASTICMQ_ENDPOINT ?? "http://elasticmq:9324",
-  ),
+  dynamoDb: boundedProbe("dynamodb", async () => {
+    for (const TableName of [
+      process.env.CORE_TABLE_NAME ?? "pirh-core-local",
+      process.env.AUDIT_TABLE_NAME ?? "pirh-audit-local",
+    ])
+      await dynamoClient.send(new DescribeTableCommand({ TableName }), {
+        abortSignal: AbortSignal.timeout(timeoutMs),
+      });
+  }),
+  elasticMq: boundedProbe("queues", async () => {
+    for (const QueueName of [
+      process.env.ROUTING_QUEUE_NAME ?? "pirh-routing-local",
+      process.env.DELIVERY_QUEUE_NAME ?? "pirh-delivery-local",
+    ])
+      await sqsClient.send(new GetQueueUrlCommand({ QueueName }), {
+        abortSignal: AbortSignal.timeout(timeoutMs),
+      });
+  }),
   controlPlane: {
     service,
     repository: persistence,
@@ -134,6 +163,7 @@ const app = await buildApi({
           .filter(Boolean),
       ),
       eventRetentionDays: Number(process.env.EVENT_RETENTION_DAYS ?? 30),
+      telemetry: runtime.telemetry,
     }),
     repository: persistence,
     producerAuthenticator: new ProducerAuthenticator(
@@ -150,6 +180,7 @@ const app = await buildApi({
       ids: { next: (prefix) => id(prefix) },
       clock: { now: () => new Date() },
       retentionDays: Number(process.env.EVENT_RETENTION_DAYS ?? 30),
+      telemetry: runtime.telemetry,
     }),
     repository: persistence,
     consoleAuthenticator,
@@ -158,5 +189,10 @@ const app = await buildApi({
       "local-cursor-secret-not-for-production",
   },
   requestId: () => id("req"),
+  logger: runtime.logger,
+  telemetry: runtime.telemetry,
 });
+for (const signal of ["SIGINT", "SIGTERM"] as const)
+  process.on(signal, () => void app.close());
+app.addHook("onClose", async () => runtime.shutdown());
 await app.listen({ host, port });

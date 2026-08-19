@@ -36,6 +36,8 @@ jobs:
         run: pnpm architecture
       - name: Unit tests
         run: pnpm test
+      - name: Security test gate
+        run: pnpm test:security
       - name: Build all workspaces
         run: pnpm build
       - name: High-severity dependency audit

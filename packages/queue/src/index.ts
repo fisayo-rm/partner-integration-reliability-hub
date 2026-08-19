@@ -41,7 +41,7 @@ export class ElasticMqQueue implements QueuePublisher {
   public async publish(input: {
     readonly body: JsonObject;
     readonly delaySeconds?: number;
-    readonly traceparent?: string;
+    readonly traceparent?: string | undefined;
   }): Promise<void> {
     await this.client.send(
       new SendMessageCommand({
@@ -74,6 +74,8 @@ export class ElasticMqQueue implements QueuePublisher {
         MaxNumberOfMessages: max,
         WaitTimeSeconds: waitSeconds,
         VisibilityTimeout: visibilityTimeout,
+        MessageAttributeNames: ["traceparent"],
+        MessageSystemAttributeNames: ["SentTimestamp"],
       }),
     );
     return response.Messages ?? [];
@@ -144,15 +146,19 @@ export function parseQueueMessage(message: Message): QueueMessage {
     throw new Error("Queue message body missing.");
   return queueMessageSchema.parse(JSON.parse(message.Body));
 }
+export function queueTraceparent(message: Message): string | undefined {
+  const value = message.MessageAttributes?.traceparent?.StringValue;
+  return typeof value === "string" && value.length > 0 ? value : undefined;
+}
 
 export async function consumeOne(
   queue: ElasticMqQueue,
-  handle: (message: QueueMessage) => Promise<void>,
+  handle: (message: QueueMessage, raw: Message) => Promise<void>,
 ): Promise<boolean> {
   const [message] = await queue.receive();
   if (message === undefined) return false;
   const parsed = parseQueueMessage(message);
-  await handle(parsed);
+  await handle(parsed, message);
   await queue.delete(message);
   return true;
 }

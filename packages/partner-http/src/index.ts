@@ -4,6 +4,8 @@ import http from "node:http";
 import https from "node:https";
 import net from "node:net";
 import type { PartnerHttpClient } from "@pirh/application";
+import { currentTraceparent, withSpan } from "@pirh/observability";
+import { redactJson, redactResponseHeaders } from "@pirh/redaction";
 
 export class UnsafeDestinationError extends Error {
   public constructor(
@@ -20,12 +22,6 @@ export interface SafePartnerHttpClientConfig {
   readonly maxResponseBytes?: number;
   readonly resolve?: (hostname: string) => Promise<readonly string[]>;
 }
-const safeHeaders = new Set([
-  "content-type",
-  "content-length",
-  "retry-after",
-  "x-request-id",
-]);
 function privateIp(value: string): boolean {
   if (net.isIP(value) === 4) {
     const [a = -1, b = -1] = value.split(".").map(Number);
@@ -50,28 +46,6 @@ function privateIp(value: string): boolean {
     normalized.startsWith("ff")
   );
 }
-function redact(value: string, paths: readonly string[]): string {
-  try {
-    const parsed = JSON.parse(value) as Record<string, unknown>;
-    for (const path of paths) {
-      const parts = path.replace(/^\$\./, "").split(".");
-      let cursor: Record<string, unknown> | undefined = parsed;
-      for (const part of parts.slice(0, -1))
-        cursor =
-          cursor !== undefined &&
-          typeof cursor[part] === "object" &&
-          cursor[part] !== null
-            ? (cursor[part] as Record<string, unknown>)
-            : undefined;
-      const last = parts.at(-1);
-      if (cursor !== undefined && last !== undefined && last in cursor)
-        cursor[last] = "[REDACTED]";
-    }
-    return JSON.stringify(parsed);
-  } catch {
-    return value;
-  }
-}
 export function captureResponse(input: {
   readonly headers: Readonly<Record<string, string | string[] | undefined>>;
   readonly body: string;
@@ -81,20 +55,18 @@ export function captureResponse(input: {
   readonly bodyExcerpt: string;
   readonly bodyHash: string;
 } {
-  const headers: Record<string, string> = {};
-  for (const [name, value] of Object.entries(input.headers))
-    if (
-      safeHeaders.has(name.toLowerCase()) &&
-      typeof value === "string" &&
-      value.length <= 2048
-    )
-      headers[name.toLowerCase()] = value;
+  const headers = redactResponseHeaders(input.headers);
+  let bodyExcerpt = input.body.slice(0, 16 * 1024);
+  try {
+    bodyExcerpt = JSON.stringify(
+      redactJson(JSON.parse(bodyExcerpt), input.redactionPaths ?? []),
+    );
+  } catch {
+    // Opaque excerpts are bounded but cannot have path-based redaction applied.
+  }
   return {
     headers,
-    bodyExcerpt: redact(
-      input.body.slice(0, 16 * 1024),
-      input.redactionPaths ?? [],
-    ),
+    bodyExcerpt,
     bodyHash: createHash("sha256").update(input.body).digest("hex"),
   };
 }
@@ -161,104 +133,116 @@ export class SafePartnerHttpClient implements PartnerHttpClient {
     readonly headers: Readonly<Record<string, string>>;
     readonly body: string;
   }> {
-    const url = await this.validateUrl(request.url);
-    const addresses = await this.resolve(url.hostname);
-    const local =
-      this.config.mode === "local" &&
-      url.protocol === "http:" &&
-      (this.config.localHttpHostnames ?? []).includes(url.hostname);
-    if (
-      addresses.length === 0 ||
-      addresses.some((address) => privateIp(address) && !local)
-    )
-      throw new UnsafeDestinationError(
-        "UNSAFE_ADDRESS",
-        "Destination address is not allowed.",
-      );
-    const address = addresses[0] as string;
-    return new Promise((resolve, reject) => {
-      const transport = url.protocol === "https:" ? https : http;
-      const req = transport.request(
-        {
-          protocol: url.protocol,
-          // Connect to the address just validated instead of resolving the hostname again.
-          // This prevents DNS rebinding between validation and the outbound socket.
-          hostname: address,
-          servername: url.hostname,
-          port: url.port || undefined,
-          path: `${url.pathname}${url.search}`,
-          method: request.method,
-          agent: false,
-          timeout: request.timeoutMs,
-          headers: {
-            ...request.headers,
-            host: url.host,
-            "accept-encoding": "identity",
-            "user-agent": "pirh/0.1",
-            "x-correlation-id": request.correlationId,
-          },
-        },
-        (response) => {
-          if (
-            response.statusCode !== undefined &&
-            response.statusCode >= 300 &&
-            response.statusCode < 400
-          ) {
-            response.resume();
-            reject(
+    return await withSpan(
+      "partner.request",
+      { component: "partner-http", correlationId: request.correlationId },
+      async () => {
+        const url = await this.validateUrl(request.url);
+        const addresses = await this.resolve(url.hostname);
+        const local =
+          this.config.mode === "local" &&
+          url.protocol === "http:" &&
+          (this.config.localHttpHostnames ?? []).includes(url.hostname);
+        if (
+          addresses.length === 0 ||
+          addresses.some((address) => privateIp(address) && !local)
+        )
+          throw new UnsafeDestinationError(
+            "UNSAFE_ADDRESS",
+            "Destination address is not allowed.",
+          );
+        const address = addresses[0] as string;
+        return new Promise((resolve, reject) => {
+          const transport = url.protocol === "https:" ? https : http;
+          const req = transport.request(
+            {
+              protocol: url.protocol,
+              // Connect to the address just validated instead of resolving the hostname again.
+              // This prevents DNS rebinding between validation and the outbound socket.
+              hostname: address,
+              servername: url.hostname,
+              port: url.port || undefined,
+              path: `${url.pathname}${url.search}`,
+              method: request.method,
+              agent: false,
+              timeout: request.timeoutMs,
+              headers: {
+                ...request.headers,
+                host: url.host,
+                "accept-encoding": "identity",
+                "user-agent": "pirh/0.1",
+                "x-correlation-id": request.correlationId,
+                ...(currentTraceparent() === undefined
+                  ? {}
+                  : { traceparent: currentTraceparent() }),
+              },
+            },
+            (response) => {
+              if (
+                response.statusCode !== undefined &&
+                response.statusCode >= 300 &&
+                response.statusCode < 400
+              ) {
+                response.resume();
+                reject(
+                  new UnsafeDestinationError(
+                    "REDIRECT",
+                    "Partner redirects are not allowed.",
+                  ),
+                );
+                return;
+              }
+              if (
+                response.headers["content-encoding"] !== undefined &&
+                response.headers["content-encoding"] !== "identity"
+              ) {
+                response.resume();
+                reject(
+                  new UnsafeDestinationError(
+                    "ENCODED_RESPONSE",
+                    "Encoded partner responses are not allowed.",
+                  ),
+                );
+                return;
+              }
+              let size = 0;
+              const chunks: Buffer[] = [];
+              response.on("data", (chunk: Buffer) => {
+                size += chunk.length;
+                if (size > this.maxResponseBytes) {
+                  req.destroy();
+                  reject(
+                    new UnsafeDestinationError(
+                      "RESPONSE_TOO_LARGE",
+                      "Partner response exceeds the limit.",
+                    ),
+                  );
+                } else chunks.push(chunk);
+              });
+              response.on("end", () => {
+                const headers: Record<string, string> = {};
+                for (const [name, value] of Object.entries(response.headers))
+                  if (typeof value === "string") headers[name] = value;
+                resolve({
+                  status: response.statusCode ?? 0,
+                  headers,
+                  body: Buffer.concat(chunks).toString("utf8"),
+                });
+              });
+            },
+          );
+          req.on("timeout", () =>
+            req.destroy(
               new UnsafeDestinationError(
-                "REDIRECT",
-                "Partner redirects are not allowed.",
+                "TIMEOUT",
+                "Partner request timed out.",
               ),
-            );
-            return;
-          }
-          if (
-            response.headers["content-encoding"] !== undefined &&
-            response.headers["content-encoding"] !== "identity"
-          ) {
-            response.resume();
-            reject(
-              new UnsafeDestinationError(
-                "ENCODED_RESPONSE",
-                "Encoded partner responses are not allowed.",
-              ),
-            );
-            return;
-          }
-          let size = 0;
-          const chunks: Buffer[] = [];
-          response.on("data", (chunk: Buffer) => {
-            size += chunk.length;
-            if (size > this.maxResponseBytes) {
-              req.destroy();
-              reject(
-                new UnsafeDestinationError(
-                  "RESPONSE_TOO_LARGE",
-                  "Partner response exceeds the limit.",
-                ),
-              );
-            } else chunks.push(chunk);
-          });
-          response.on("end", () => {
-            const headers: Record<string, string> = {};
-            for (const [name, value] of Object.entries(response.headers))
-              if (typeof value === "string") headers[name] = value;
-            resolve({
-              status: response.statusCode ?? 0,
-              headers,
-              body: Buffer.concat(chunks).toString("utf8"),
-            });
-          });
-        },
-      );
-      req.on("timeout", () =>
-        req.destroy(
-          new UnsafeDestinationError("TIMEOUT", "Partner request timed out."),
-        ),
-      );
-      req.on("error", reject);
-      req.end(request.body);
-    });
+            ),
+          );
+          req.on("error", reject);
+          req.end(request.body);
+        });
+      },
+    );
   }
 }

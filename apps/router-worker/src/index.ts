@@ -1,11 +1,26 @@
 import { DynamoDBClient } from "@aws-sdk/client-dynamodb";
 import { DynamoDBDocumentClient } from "@aws-sdk/lib-dynamodb";
 import { RoutingService } from "@pirh/application";
+import {
+  createTelemetryRuntime,
+  withExtractedTrace,
+} from "@pirh/observability";
 import { DynamoPersistence } from "@pirh/persistence";
-import { consumeOne, createSqsClient, ElasticMqQueue } from "@pirh/queue";
+import {
+  consumeOne,
+  createSqsClient,
+  ElasticMqQueue,
+  queueTraceparent,
+} from "@pirh/queue";
 import { executeTransformation } from "@pirh/transformation";
 
 const region = process.env.AWS_REGION ?? "us-east-1";
+const runtime = createTelemetryRuntime({
+  service: "router-worker",
+  environment: process.env.APP_ENV ?? "local",
+  otlpEndpoint: process.env.PIRH_OTLP_ENDPOINT,
+  logLevel: process.env.LOG_LEVEL,
+});
 const credentials = { accessKeyId: "local", secretAccessKey: "local" };
 const persistence = new DynamoPersistence(
   DynamoDBDocumentClient.from(
@@ -33,6 +48,7 @@ const service = new RoutingService({
   ids: ids as never,
   clock: { now: () => new Date() },
   retentionDays: Number(process.env.EVENT_RETENTION_DAYS ?? 30),
+  telemetry: runtime.telemetry,
 });
 const queue = new ElasticMqQueue(
   createSqsClient({
@@ -49,26 +65,31 @@ for (const signal of ["SIGINT", "SIGTERM"] as const)
   });
 while (!stopping) {
   try {
-    await consumeOne(queue, async (message) => {
+    await consumeOne(queue, async (message, raw) => {
       if (message.messageType !== "ROUTE_EVENT") return;
-      await service.route(message as never);
-      console.log(
-        JSON.stringify({
-          service: "router-worker",
-          event: "routing.completed",
+      await withExtractedTrace(
+        queueTraceparent(raw),
+        "routing.consume",
+        {
+          messageType: message.messageType,
           correlationId: message.correlationId,
           eventId: message.eventId,
-        }),
+          tenantId: message.tenantId,
+        },
+        async () => {
+          await service.route(message as never);
+          runtime.logger.info("Routing completed", {
+            event: "routing.completed",
+            correlationId: message.correlationId,
+            eventId: message.eventId,
+            tenantId: message.tenantId,
+          });
+        },
       );
     });
   } catch (error) {
-    console.error(
-      JSON.stringify({
-        service: "router-worker",
-        event: "routing.failed",
-        error: error instanceof Error ? error.message : "unknown",
-      }),
-    );
+    runtime.logger.error("Routing failed", { event: "routing.failed", error });
   }
 }
+await runtime.shutdown();
 export {};

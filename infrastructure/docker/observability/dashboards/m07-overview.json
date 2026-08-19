@@ -1,0 +1,33 @@
+{
+  "uid": "pirh-m07-overview",
+  "title": "PIRH M07 Operational Overview",
+  "schemaVersion": 39,
+  "version": 1,
+  "panels": [
+    {
+      "type": "timeseries",
+      "title": "API traffic and latency",
+      "targets": [{ "expr": "api_requests_total" }]
+    },
+    {
+      "type": "timeseries",
+      "title": "Delivery outcomes",
+      "targets": [{ "expr": "delivery_attempts_total" }]
+    },
+    {
+      "type": "timeseries",
+      "title": "Outbox publication failures",
+      "targets": [{ "expr": "outbox_publication_failure_total" }]
+    },
+    {
+      "type": "timeseries",
+      "title": "Replay outcomes",
+      "targets": [{ "expr": "replay_outcome_total" }]
+    },
+    {
+      "type": "logs",
+      "title": "Correlated structured logs",
+      "targets": [{ "expr": "{}" }]
+    }
+  ]
+}

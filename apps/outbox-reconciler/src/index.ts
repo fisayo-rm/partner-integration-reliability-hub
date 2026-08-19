@@ -2,12 +2,22 @@ import { DynamoDBClient } from "@aws-sdk/client-dynamodb";
 import { DynamoDBDocumentClient } from "@aws-sdk/lib-dynamodb";
 import { DynamoPersistence } from "@pirh/persistence";
 import {
+  createTelemetryRuntime,
+  withExtractedTrace,
+} from "@pirh/observability";
+import {
   createSqsClient,
   ElasticMqQueue,
   outboxQueueMessage,
 } from "@pirh/queue";
 
 const region = process.env.AWS_REGION ?? "us-east-1";
+const runtime = createTelemetryRuntime({
+  service: "outbox-reconciler",
+  environment: process.env.APP_ENV ?? "local",
+  otlpEndpoint: process.env.PIRH_OTLP_ENDPOINT,
+  logLevel: process.env.LOG_LEVEL,
+});
 const credentials = { accessKeyId: "local", secretAccessKey: "local" };
 const persistence = new DynamoPersistence(
   DynamoDBDocumentClient.from(
@@ -55,48 +65,55 @@ async function tick() {
       25,
     )) {
       try {
-        if (record.kind === "SCHEDULE_DELIVERY") {
-          const notBefore = new Date(String(record.payload.notBefore));
-          if (notBefore.getTime() - Date.now() > 900_000) {
-            await persistence.materializeScheduledWork(record);
-            continue;
-          }
-          const message = outboxQueueMessage(record);
-          if (message === undefined) continue;
-          await delivery.publish({
-            body: message as never,
-            delaySeconds: Math.max(
-              0,
-              Math.ceil((notBefore.getTime() - Date.now()) / 1_000),
-            ),
-          });
-          await persistence.markPublished(record, new Date());
-          continue;
-        }
-        const message = outboxQueueMessage(record);
-        if (message === undefined) continue;
-        await (record.kind === "ROUTE_EVENT" ? routing : delivery).publish({
-          body: message as never,
-        });
-        await persistence.markPublished(record, new Date());
-        console.log(
-          JSON.stringify({
-            service: "outbox-reconciler",
-            event: "outbox.republished",
-            correlationId: message.correlationId,
-            outboxId: record.outboxId,
-          }),
+        await withExtractedTrace(
+          record.traceparent,
+          "outbox.reconcile",
+          { kind: record.kind },
+          async () => {
+            if (record.kind === "SCHEDULE_DELIVERY") {
+              const notBefore = new Date(String(record.payload.notBefore));
+              if (notBefore.getTime() - Date.now() > 900_000) {
+                await persistence.materializeScheduledWork(record);
+                return;
+              }
+              const message = outboxQueueMessage(record);
+              if (message === undefined) return;
+              await delivery.publish({
+                body: message as never,
+                delaySeconds: Math.max(
+                  0,
+                  Math.ceil((notBefore.getTime() - Date.now()) / 1_000),
+                ),
+                traceparent: record.traceparent,
+              });
+              await persistence.markPublished(record, new Date());
+              return;
+            }
+            const message = outboxQueueMessage(record);
+            if (message === undefined) return;
+            await (record.kind === "ROUTE_EVENT" ? routing : delivery).publish({
+              body: message as never,
+              traceparent: record.traceparent,
+            });
+            await persistence.markPublished(record, new Date());
+            runtime.telemetry.count("outbox.republished");
+            runtime.logger.info("Outbox republished", {
+              event: "outbox.republished",
+              correlationId: message.correlationId,
+              outboxId: record.outboxId,
+              tenantId: record.tenantId,
+            });
+          },
         );
       } catch (error) {
         await persistence.recordPublicationFailure(record, new Date());
-        console.error(
-          JSON.stringify({
-            service: "outbox-reconciler",
-            event: "outbox.republish_failed",
-            outboxId: record.outboxId,
-            error: error instanceof Error ? error.message : "unknown",
-          }),
-        );
+        runtime.telemetry.count("outbox.publication_failure");
+        runtime.logger.error("Outbox republish failed", {
+          event: "outbox.republish_failed",
+          outboxId: record.outboxId,
+          tenantId: record.tenantId,
+          error,
+        });
       }
     }
   for (
@@ -120,6 +137,7 @@ async function tick() {
           cause: work.cause,
           notBefore: work.notBefore,
         } as never,
+        traceparent: work.traceparent,
       });
       await persistence.markScheduledWorkPublished(work, new Date());
     }
@@ -128,4 +146,5 @@ while (!stopping) {
   await tick();
   await new Promise((resolve) => setTimeout(resolve, intervalMs));
 }
+await runtime.shutdown();
 export {};

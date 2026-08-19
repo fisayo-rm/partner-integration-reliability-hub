@@ -2,12 +2,22 @@ import { DynamoDBClient } from "@aws-sdk/client-dynamodb";
 import { DynamoDBDocumentClient } from "@aws-sdk/lib-dynamodb";
 import { DynamoPersistence } from "@pirh/persistence";
 import {
+  createTelemetryRuntime,
+  withExtractedTrace,
+} from "@pirh/observability";
+import {
   createSqsClient,
   ElasticMqQueue,
   outboxQueueMessage,
 } from "@pirh/queue";
 
 const region = process.env.AWS_REGION ?? "us-east-1";
+const runtime = createTelemetryRuntime({
+  service: "outbox-worker",
+  environment: process.env.APP_ENV ?? "local",
+  otlpEndpoint: process.env.PIRH_OTLP_ENDPOINT,
+  logLevel: process.env.LOG_LEVEL,
+});
 const dynamoEndpoint =
   process.env.DYNAMODB_ENDPOINT ?? "http://dynamodb-local:8000";
 const queueEndpoint = process.env.ELASTICMQ_ENDPOINT ?? "http://elasticmq:9324";
@@ -41,49 +51,63 @@ for (const signal of ["SIGINT", "SIGTERM"] as const)
 async function publish(
   record: Awaited<ReturnType<typeof persistence.getUnpublished>>[number],
 ) {
-  try {
-    if (record.kind === "SCHEDULE_DELIVERY") {
-      const notBefore = new Date(String(record.payload.notBefore));
-      const delay = Math.max(
-        0,
-        Math.ceil((notBefore.getTime() - Date.now()) / 1_000),
-      );
-      if (delay > 900) {
-        await persistence.materializeScheduledWork(record);
-        return;
+  return withExtractedTrace(
+    record.traceparent,
+    "outbox.publish",
+    { kind: record.kind },
+    async () => {
+      try {
+        if (record.kind === "SCHEDULE_DELIVERY") {
+          const notBefore = new Date(String(record.payload.notBefore));
+          const delay = Math.max(
+            0,
+            Math.ceil((notBefore.getTime() - Date.now()) / 1_000),
+          );
+          if (delay > 900) {
+            await persistence.materializeScheduledWork(record);
+            return;
+          }
+          const message = outboxQueueMessage(record);
+          if (message === undefined) return;
+          await delivery.publish({
+            body: message as never,
+            delaySeconds: delay,
+            traceparent: record.traceparent,
+          });
+          await persistence.markPublished(record, new Date());
+          return;
+        }
+        const message = outboxQueueMessage(record);
+        if (message === undefined) return;
+        await (record.kind === "ROUTE_EVENT" ? routing : delivery).publish({
+          body: message as never,
+          traceparent: record.traceparent,
+        });
+        await persistence.markPublished(record, new Date());
+        runtime.telemetry.count("outbox.published");
+        runtime.telemetry.duration(
+          "outbox.age",
+          Date.now() - new Date(record.createdAt).getTime(),
+        );
+        runtime.logger.info("Outbox published", {
+          event: "outbox.published",
+          correlationId: message.correlationId,
+          eventId: message.eventId,
+          deliveryId: "deliveryId" in message ? message.deliveryId : undefined,
+          tenantId: record.tenantId,
+        });
+      } catch (error) {
+        await persistence.recordPublicationFailure(record, new Date());
+        runtime.telemetry.count("outbox.publication_failure");
+        runtime.logger.error("Outbox publication failed", {
+          event: "outbox.publish_failed",
+          outboxId: record.outboxId,
+          tenantId: record.tenantId,
+          error,
+        });
       }
-      const message = outboxQueueMessage(record);
-      if (message === undefined) return;
-      await delivery.publish({ body: message as never, delaySeconds: delay });
-      await persistence.markPublished(record, new Date());
-      return;
-    }
-    const message = outboxQueueMessage(record);
-    if (message === undefined) return;
-    await (record.kind === "ROUTE_EVENT" ? routing : delivery).publish({
-      body: message as never,
-    });
-    await persistence.markPublished(record, new Date());
-    console.log(
-      JSON.stringify({
-        service: "outbox-worker",
-        event: "outbox.published",
-        correlationId: message.correlationId,
-        eventId: message.eventId,
-        deliveryId: "deliveryId" in message ? message.deliveryId : undefined,
-      }),
-    );
-  } catch (error) {
-    await persistence.recordPublicationFailure(record, new Date());
-    console.error(
-      JSON.stringify({
-        service: "outbox-worker",
-        event: "outbox.publish_failed",
-        outboxId: record.outboxId,
-        error: error instanceof Error ? error.message : "unknown",
-      }),
-    );
-  }
+    },
+  );
 }
 async function tick() {
   for (
@@ -102,4 +126,5 @@ while (!stopping) {
   await tick();
   await new Promise((resolve) => setTimeout(resolve, intervalMs));
 }
+await runtime.shutdown();
 export {};

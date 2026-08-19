@@ -82,6 +82,9 @@ async function eventually(url, label, maxAttempts = 40) {
   throw new Error(`${label} did not become reachable: ${lastError}`);
 }
 async function verify(profile) {
+  if (profile === "observability")
+    composeEnvironment.PIRH_OTLP_ENDPOINT = "http://otel-collector:4318";
+  else delete composeEnvironment.PIRH_OTLP_ENDPOINT;
   const args = profile
     ? ["--profile", profile, "up", "--build", "--detach", "--wait"]
     : ["up", "--build", "--detach", "--wait"];
@@ -119,6 +122,7 @@ async function verify(profile) {
       ["http://localhost:3001/api/health", "Grafana"],
     ])
       await eventually(url, label, maxAttempts);
+    await pnpm(["demo:m07"]);
   }
 }
 try {

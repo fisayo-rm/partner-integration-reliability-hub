@@ -1,16 +1,28 @@
 import { DynamoDBClient } from "@aws-sdk/client-dynamodb";
 import { DynamoDBDocumentClient } from "@aws-sdk/lib-dynamodb";
 import { DeliveryService, type OAuthTokenProvider } from "@pirh/application";
+import {
+  addTraceAttributes,
+  createTelemetryRuntime,
+  withExtractedTrace,
+} from "@pirh/observability";
 import { SafePartnerHttpClient } from "@pirh/partner-http";
 import { DynamoPersistence } from "@pirh/persistence";
 import {
   createSqsClient,
   ElasticMqQueue,
   parseQueueMessage,
+  queueTraceparent,
 } from "@pirh/queue";
 import { LocalDynamoDbSecretStore } from "@pirh/secrets";
 
 const region = process.env.AWS_REGION ?? "us-east-1";
+const runtime = createTelemetryRuntime({
+  service: "delivery-worker",
+  environment: process.env.APP_ENV ?? "local",
+  otlpEndpoint: process.env.PIRH_OTLP_ENDPOINT,
+  logLevel: process.env.LOG_LEVEL,
+});
 const credentials = { accessKeyId: "local", secretAccessKey: "local" };
 const coreTableName = process.env.CORE_TABLE_NAME ?? "pirh-core-local";
 const documentClient = DynamoDBDocumentClient.from(
@@ -100,6 +112,7 @@ const service = new DeliveryService({
   oauth,
   ids: ids as never,
   clock: { now: () => new Date() },
+  telemetry: runtime.telemetry,
 });
 const queue = new ElasticMqQueue(
   createSqsClient({
@@ -122,72 +135,76 @@ while (!stopping) {
       Number(process.env.DELIVERY_VISIBILITY_TIMEOUT_SECONDS ?? 360),
     );
     const results = await Promise.allSettled(
-      messages.map(async (raw) => {
-        const message = parseQueueMessage(raw);
-        if (message.messageType === "RESUME_DESTINATION")
-          await persistence.resumeDestination({
-            context: {
-              tenantId: message.tenantId as never,
-              actorType: "system",
-              actorId: "delivery-worker",
-              requestId: "resume-destination",
-              correlationId: message.correlationId as never,
-            },
-            destinationId: message.destinationId as never,
-            now: new Date(),
-          });
-        else if (message.messageType === "DELIVER") {
-          const outcome = await service.deliver({
-            ...message,
-            owner: process.env.HOSTNAME ?? "delivery-worker",
-          } as never);
-          if (!outcome.acknowledge) {
-            await queue.defer(raw, outcome.delaySeconds ?? 5);
-            console.log(
-              JSON.stringify({
-                service: "delivery-worker",
-                event: "delivery.deferred",
+      messages.map((raw) =>
+        withExtractedTrace(
+          queueTraceparent(raw),
+          "delivery.consume",
+          { queue: "delivery" },
+          async () => {
+            const message = parseQueueMessage(raw);
+            if (message.messageType === "DELIVER") {
+              addTraceAttributes({
                 correlationId: message.correlationId,
                 eventId: message.eventId,
                 deliveryId: message.deliveryId,
-                delaySeconds: outcome.delaySeconds ?? 5,
-              }),
-            );
-            return;
-          }
-          console.log(
-            JSON.stringify({
-              service: "delivery-worker",
-              event: "delivery.completed",
-              correlationId: message.correlationId,
-              eventId: message.eventId,
-              deliveryId: message.deliveryId,
-            }),
-          );
-        }
-        await queue.delete(raw);
-      }),
+                tenantId: message.tenantId,
+              });
+              runtime.telemetry.count("queue.delivery_received");
+            }
+            if (message.messageType === "RESUME_DESTINATION")
+              await persistence.resumeDestination({
+                context: {
+                  tenantId: message.tenantId as never,
+                  actorType: "system",
+                  actorId: "delivery-worker",
+                  requestId: "resume-destination",
+                  correlationId: message.correlationId as never,
+                },
+                destinationId: message.destinationId as never,
+                now: new Date(),
+              });
+            else if (message.messageType === "DELIVER") {
+              const outcome = await service.deliver({
+                ...message,
+                owner: process.env.HOSTNAME ?? "delivery-worker",
+              } as never);
+              if (!outcome.acknowledge) {
+                await queue.defer(raw, outcome.delaySeconds ?? 5);
+                runtime.logger.info("Delivery deferred", {
+                  event: "delivery.deferred",
+                  correlationId: message.correlationId,
+                  eventId: message.eventId,
+                  deliveryId: message.deliveryId,
+                  delaySeconds: outcome.delaySeconds ?? 5,
+                  tenantId: message.tenantId,
+                });
+                return;
+              }
+              runtime.logger.info("Delivery completed", {
+                event: "delivery.completed",
+                correlationId: message.correlationId,
+                eventId: message.eventId,
+                deliveryId: message.deliveryId,
+                tenantId: message.tenantId,
+              });
+            }
+            await queue.delete(raw);
+          },
+        ),
+      ),
     );
     for (const result of results)
       if (result.status === "rejected")
-        console.error(
-          JSON.stringify({
-            service: "delivery-worker",
-            event: "delivery.failed",
-            error:
-              result.reason instanceof Error
-                ? result.reason.message
-                : "unknown",
-          }),
-        );
+        runtime.logger.error("Delivery failed", {
+          event: "delivery.failed",
+          error: result.reason,
+        });
   } catch (error) {
-    console.error(
-      JSON.stringify({
-        service: "delivery-worker",
-        event: "delivery.failed",
-        error: error instanceof Error ? error.message : "unknown",
-      }),
-    );
+    runtime.logger.error("Delivery failed", {
+      event: "delivery.failed",
+      error,
+    });
   }
 }
+await runtime.shutdown();
 export {};

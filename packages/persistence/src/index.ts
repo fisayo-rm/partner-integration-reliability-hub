@@ -1324,6 +1324,9 @@ export class DynamoPersistence
       notBefore: payload.notBefore as never,
       cause: payload.cause,
       createdAt: record.createdAt,
+      ...(record.traceparent === undefined
+        ? {}
+        : { traceparent: record.traceparent }),
       attempts: 0,
       expiresAt: new Date(
         new Date(record.createdAt).getTime() + 7 * 86_400_000,

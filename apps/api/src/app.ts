@@ -35,6 +35,11 @@ import {
   type CoreRepository,
 } from "@pirh/application";
 import {
+  addTraceAttributes,
+  withSpan,
+  type RuntimeLogger,
+} from "@pirh/observability";
+import {
   AuthenticationError,
   requireRole,
   type ConsoleAuthenticator,
@@ -80,6 +85,8 @@ export interface ApiDependencies {
     readonly now?: () => Date;
   };
   readonly requestId?: () => string;
+  readonly logger?: RuntimeLogger;
+  readonly telemetry?: import("@pirh/application").Telemetry;
 }
 
 function cursor(secret: string, value: string): string {
@@ -236,7 +243,14 @@ export async function buildApi(
   );
   app.setErrorHandler((caught, request, reply) => {
     const correlationId = `cor_${request.id.slice(4)}`;
-    if (caught instanceof AuthenticationError)
+    if (caught instanceof AuthenticationError) {
+      dependencies.logger?.warn("Authentication failed", {
+        event: "authentication.failed",
+        route: request.routeOptions.url,
+        requestId: request.id,
+        correlationId,
+        statusCode: caught.statusCode,
+      });
       return reply.code(caught.statusCode).send({
         error: {
           code: caught.statusCode === 403 ? "FORBIDDEN" : "UNAUTHORIZED",
@@ -245,6 +259,7 @@ export async function buildApi(
           correlationId,
         },
       });
+    }
     if ((caught as { statusCode?: number }).statusCode === 413)
       return reply.code(413).send({
         error: {
@@ -294,9 +309,18 @@ export async function buildApi(
       dependencies.dynamoDb(),
       dependencies.elasticMq(),
     ]);
-    if (probes.every((probe) => probe.ok))
-      return { status: "ready", dependencies: probes };
-    return reply.code(503).send({ status: "not_ready", dependencies: probes });
+    const checks = probes.map((probe) => ({
+      name: probe.name,
+      status: probe.ok ? "up" : "down",
+    }));
+    if (probes.every((probe) => probe.ok)) return { status: "ready", checks };
+    dependencies.logger?.warn("Readiness probe failed", {
+      event: "health.not_ready",
+      failedChecks: probes
+        .filter((probe) => !probe.ok)
+        .map((probe) => probe.name),
+    });
+    return reply.code(503).send({ status: "not_ready", checks });
   });
   app.get(
     "/api/v1/meta",
@@ -358,16 +382,18 @@ export async function buildApi(
           });
         try {
           const parsed = canonicalEventRequestSchema.parse(request.body);
-          const accepted = await ingestion.service.accept(
-            request.tenantContext as TenantContext,
-            {
-              eventType: parsed.eventType,
-              occurredAt: parsed.occurredAt,
-              subject: parsed.subject,
-              data: parsed.data as never,
-              metadata: parsed.metadata as never,
-              idempotencyKey,
-            },
+          const accepted = await withSpan(
+            "api.events.submit",
+            { route: "events.submit" },
+            () =>
+              ingestion.service.accept(request.tenantContext as TenantContext, {
+                eventType: parsed.eventType,
+                occurredAt: parsed.occurredAt,
+                subject: parsed.subject,
+                data: parsed.data as never,
+                metadata: parsed.metadata as never,
+                idempotencyKey,
+              }),
           );
           const body = eventAcceptanceResponseSchema.parse({
             eventId: accepted.event.eventId,
@@ -376,15 +402,22 @@ export async function buildApi(
             previouslyAccepted: accepted.previouslyAccepted,
             acceptedAt: accepted.event.acceptedAt,
           });
-          console.log(
-            JSON.stringify({
-              service: "api",
-              event: "event.accepted",
-              eventId: body.eventId,
-              correlationId: body.correlationId,
-              duplicate: body.previouslyAccepted,
-            }),
-          );
+          addTraceAttributes({
+            correlationId: body.correlationId,
+            eventId: body.eventId,
+            tenantId: (request.tenantContext as TenantContext).tenantId,
+          });
+          dependencies.telemetry?.count("api.requests", 1, {
+            route: "events.submit",
+            statusCode: accepted.previouslyAccepted ? 200 : 202,
+          });
+          dependencies.logger?.info("Event accepted", {
+            event: "event.accepted",
+            eventId: body.eventId,
+            correlationId: body.correlationId,
+            duplicate: body.previouslyAccepted,
+            tenantId: (request.tenantContext as TenantContext).tenantId,
+          });
           return reply
             .code(accepted.previouslyAccepted ? 200 : 202)
             .header("x-correlation-id", body.correlationId)

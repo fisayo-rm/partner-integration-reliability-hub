@@ -23,6 +23,7 @@ test("pull-request workflow runs Stage A and the local platform/integration smok
       "Test TypeScript compile",
       "Architecture dependency test",
       "Unit tests",
+      "Security test gate",
       "Build all workspaces",
       "High-severity dependency audit",
       "Source and configuration secret scan",
@@ -36,6 +37,7 @@ test("pull-request workflow runs Stage A and the local platform/integration smok
       "pnpm format:check",
       "pnpm test:typecheck",
       "pnpm test",
+      "pnpm test:security",
       "pnpm build",
     ]),
   );

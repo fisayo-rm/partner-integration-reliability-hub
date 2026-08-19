@@ -1,4 +1,5 @@
 import { createHash } from "node:crypto";
+import { redactJson as redactJsonValue } from "@pirh/redaction";
 import {
   classifyDeliveryResult,
   isTerminalDeliveryState,
@@ -428,11 +429,31 @@ export interface PartnerHttpClient {
   }>;
 }
 export interface Telemetry {
-  record(
+  count(
     name: string,
+    value?: number,
     attributes?: Readonly<Record<string, string | number | boolean>>,
   ): void;
+  duration(
+    name: string,
+    valueMs: number,
+    attributes?: Readonly<Record<string, string | number | boolean>>,
+  ): void;
+  gauge(
+    name: string,
+    value: number,
+    attributes?: Readonly<Record<string, string | number | boolean>>,
+  ): void;
+  traceparent(): string | undefined;
+  traceId(): string | undefined;
 }
+export const noopTelemetry: Telemetry = {
+  count: () => undefined,
+  duration: () => undefined,
+  gauge: () => undefined,
+  traceparent: () => undefined,
+  traceId: () => undefined,
+};
 export interface Clock {
   now(): Date;
 }
@@ -900,6 +921,7 @@ export interface EventIngestionDependencies {
   readonly clock: Clock;
   readonly supportedEventTypes: ReadonlySet<string>;
   readonly eventRetentionDays: number;
+  readonly telemetry?: Telemetry;
 }
 
 export class EventIngestionService {
@@ -966,6 +988,9 @@ export class EventIngestionService {
       payload: { eventId, correlationId, cause: "INITIAL" },
       createdAt: at,
       attempts: 0,
+      ...(this.dependencies.telemetry?.traceparent() === undefined
+        ? {}
+        : { traceparent: this.dependencies.telemetry.traceparent() }),
       schemaVersion: 1,
     };
     const result = await this.dependencies.writer.accept({
@@ -979,6 +1004,8 @@ export class EventIngestionService {
       outbox,
     });
     if (result.kind === "conflict") throw new Error("IDEMPOTENCY_KEY_REUSED");
+    if (result.kind === "accepted")
+      (this.dependencies.telemetry ?? noopTelemetry).count("events.accepted");
     return {
       event: result.event,
       previouslyAccepted: result.kind === "duplicate",
@@ -993,6 +1020,7 @@ export interface RoutingDependencies {
   readonly ids: IdGenerator;
   readonly clock: Clock;
   readonly retentionDays: number;
+  readonly telemetry?: Telemetry;
 }
 
 function routingContext(
@@ -1133,6 +1161,9 @@ export class RoutingService {
           },
           createdAt: at,
           attempts: 0,
+          ...(this.dependencies.telemetry?.traceparent() === undefined
+            ? {}
+            : { traceparent: this.dependencies.telemetry.traceparent() }),
           schemaVersion: 1,
         };
         const result = await this.dependencies.repository.createDelivery({
@@ -1192,6 +1223,13 @@ export class RoutingService {
       }
     }
     void created;
+    (this.dependencies.telemetry ?? noopTelemetry).count(
+      "routing.completed",
+      1,
+      {
+        deliveriesCreated: created,
+      },
+    );
     await this.dependencies.repository.completeRouting(context, event.eventId);
   }
 }
@@ -1200,23 +1238,7 @@ export function redactedJson(
   value: JsonObject,
   paths: readonly string[],
 ): JsonObject {
-  const result = JSON.parse(JSON.stringify(value)) as JsonObject;
-  for (const path of paths) {
-    const parts = path.replace(/^\$\./, "").split(".");
-    let target: Record<string, JsonObject[keyof JsonObject]> | undefined =
-      result;
-    for (const part of parts.slice(0, -1)) {
-      const next: unknown = target?.[part];
-      target =
-        next !== null && typeof next === "object" && !Array.isArray(next)
-          ? (next as Record<string, JsonObject[keyof JsonObject]>)
-          : undefined;
-    }
-    const final = parts.at(-1);
-    if (target !== undefined && final !== undefined && final in target)
-      target[final] = "[REDACTED]";
-  }
-  return result;
+  return redactJsonValue(value, paths);
 }
 
 export interface ReplayDependencies {
@@ -1232,6 +1254,7 @@ export interface ReplayDependencies {
   readonly ids: IdGenerator;
   readonly clock: Clock;
   readonly retentionDays: number;
+  readonly telemetry?: Telemetry;
 }
 export class ReplayService {
   public constructor(private readonly dependencies: ReplayDependencies) {}
@@ -1418,6 +1441,9 @@ export class ReplayService {
         },
         createdAt: at,
         attempts: 0,
+        ...(this.dependencies.telemetry?.traceparent() === undefined
+          ? {}
+          : { traceparent: this.dependencies.telemetry.traceparent() }),
         schemaVersion: 1,
       },
       audit: {
@@ -1449,6 +1475,8 @@ export class ReplayService {
       },
     });
     if (result.kind === "conflict") throw new Error("IDEMPOTENCY_KEY_REUSED");
+    if (result.kind === "created")
+      (this.dependencies.telemetry ?? noopTelemetry).count("replay.requested");
     return {
       replayId: result.replayId,
       deliveryId: result.delivery.deliveryId,
@@ -1479,6 +1507,7 @@ export interface DeliveryDependencies {
   readonly ids: IdGenerator;
   readonly clock: Clock;
   readonly random?: { next(): number };
+  readonly telemetry?: Telemetry;
 }
 
 function redactedHeaders(headers: Readonly<Record<string, string>>) {
@@ -1625,6 +1654,9 @@ export class DeliveryService {
         },
         createdAt: now.toISOString() as never,
         attempts: 0,
+        ...(this.dependencies.telemetry?.traceparent() === undefined
+          ? {}
+          : { traceparent: this.dependencies.telemetry.traceparent() }),
         schemaVersion: 1,
       };
       await this.dependencies.repository.defer({
@@ -1717,6 +1749,9 @@ export class DeliveryService {
       requestHeadersRedacted: {},
       requestBodyHash: createHash("sha256").update(body).digest("hex"),
       outcome: "started",
+      ...(this.dependencies.telemetry?.traceId() === undefined
+        ? {}
+        : { traceId: this.dependencies.telemetry.traceId() }),
       expiresAt: leased.expiresAt,
     };
     const startedDelivery = await this.dependencies.repository.startAttempt({
@@ -1889,6 +1924,9 @@ export class DeliveryService {
             },
             createdAt: completed.toISOString() as never,
             attempts: 0,
+            ...(this.dependencies.telemetry?.traceparent() === undefined
+              ? {}
+              : { traceparent: this.dependencies.telemetry.traceparent() }),
             schemaVersion: 1 as const,
           };
     const circuitAfter = this.dependencies.repository.circuitAfterAttempt({
@@ -1938,6 +1976,37 @@ export class DeliveryService {
       circuit: circuitAfter,
     });
     if (!finalized) throw new Error("DELIVERY_FINALIZATION_CONFLICT");
+    const telemetry = this.dependencies.telemetry ?? noopTelemetry;
+    telemetry.count("delivery.attempts", 1, {
+      executionType: startedDelivery.executionType,
+      destination: startedDelivery.destinationId,
+    });
+    telemetry.duration("delivery.duration", completedAttempt.durationMs ?? 0, {
+      outcome: completedAttempt.outcome,
+      executionType: startedDelivery.executionType,
+      destination: startedDelivery.destinationId,
+    });
+    telemetry.count(
+      classification.success
+        ? "delivery.success"
+        : state === "dead_lettered"
+          ? "delivery.dead_lettered"
+          : state === "retry_scheduled"
+            ? "delivery.retry_scheduled"
+            : "delivery.failure",
+      1,
+      {
+        executionType: startedDelivery.executionType,
+        destination: startedDelivery.destinationId,
+        ...(classification.failureCategory === undefined
+          ? {}
+          : { failureCategory: classification.failureCategory }),
+      },
+    );
+    if (startedDelivery.executionType === "REPLAY")
+      telemetry.count(
+        classification.success ? "replay.succeeded" : "replay.failed",
+      );
     return { acknowledge: true };
   }
 }

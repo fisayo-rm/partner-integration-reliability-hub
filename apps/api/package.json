@@ -17,6 +17,7 @@
   "dependencies": {
     "@fastify/swagger": "9.5.1",
     "@aws-sdk/client-dynamodb": "3.1111.0",
+    "@aws-sdk/client-sqs": "3.1111.0",
     "@aws-sdk/lib-dynamodb": "3.1111.0",
     "@pirh/auth": "workspace:*",
     "@pirh/application": "workspace:*",
@@ -26,6 +27,7 @@
     "@pirh/secrets": "workspace:*",
     "@pirh/transformation": "workspace:*",
     "@pirh/partner-http": "workspace:*",
+    "@pirh/observability": "workspace:*",
     "fastify": "5.8.5"
   }
 }

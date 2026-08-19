@@ -10,6 +10,7 @@
     { "path": "../../packages/persistence" },
     { "path": "../../packages/secrets" },
     { "path": "../../packages/transformation" },
-    { "path": "../../packages/partner-http" }
+    { "path": "../../packages/partner-http" },
+    { "path": "../../packages/observability" }
   ]
 }

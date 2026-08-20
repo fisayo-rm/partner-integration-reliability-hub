@@ -132,6 +132,7 @@ services:
       LOCAL_CURSOR_SECRET: ${LOCAL_CURSOR_SECRET:-local-cursor-secret}
       PIRH_OTLP_ENDPOINT: ${PIRH_OTLP_ENDPOINT:-}
       LOG_LEVEL: ${LOG_LEVEL:-info}
+      CONSOLE_ORIGIN: ${CONSOLE_ORIGIN:-http://localhost:5173}
     ports: ["3000:3000"]
     healthcheck:
       test:
@@ -144,12 +145,20 @@ services:
       retries: 20
 
   console:
-    image: nginx:1.27.2-alpine
+    image: pirh-console:local
+    build:
+      context: .
+      dockerfile: infrastructure/docker/Dockerfile.console
+      args:
+        VITE_API_BASE_URL: ${VITE_API_BASE_URL:-http://localhost:3000}
+        VITE_OIDC_AUTHORITY: ${VITE_OIDC_AUTHORITY:-http://localhost:8080/realms/pirh-local}
+        VITE_OIDC_CLIENT_ID: ${VITE_OIDC_CLIENT_ID:-pirh-console}
     restart: on-failure:3
-    volumes: ["./apps/console/public:/usr/share/nginx/html:ro"]
+    depends_on:
+      api: { condition: service_healthy }
     ports: ["5173:80"]
     healthcheck:
-      test: ["CMD-SHELL", "wget -q -O /dev/null http://localhost/ || exit 1"]
+      test: ["CMD-SHELL", "wget -q -O /dev/null http://127.0.0.1/ || exit 1"]
       interval: 5s
       timeout: 3s
       retries: 20

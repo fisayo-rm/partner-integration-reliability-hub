@@ -42,6 +42,12 @@ export interface Page<T> {
   readonly cursor?: string | undefined;
 }
 
+export interface TransformationSummary {
+  readonly transformationId: TransformationVersion["transformationId"];
+  readonly externalKey: string;
+  readonly latestVersion: number;
+}
+
 export interface IdentityRepository {
   findVerifiedIdentity(
     issuer: string,
@@ -99,6 +105,22 @@ export interface ControlPlaneRepository {
     context: TenantContext,
     input: { readonly limit: number; readonly cursor?: string },
   ): Promise<Page<Subscription>>;
+  listDestinations(
+    context: TenantContext,
+    input: {
+      readonly limit: number;
+      readonly cursor?: string;
+      readonly partnerId?: Partner["partnerId"];
+    },
+  ): Promise<Page<Destination>>;
+  getCircuitState(
+    context: TenantContext,
+    destinationId: Destination["destinationId"],
+  ): Promise<CircuitRuntimeState>;
+  listTransformations(
+    context: TenantContext,
+    input: { readonly limit: number; readonly cursor?: string },
+  ): Promise<Page<TransformationSummary>>;
   listTransformationVersions(
     context: TenantContext,
     transformationId: TransformationVersion["transformationId"],
@@ -204,6 +226,22 @@ export interface OperationsRepository {
     context: TenantContext,
     input: { readonly from: string; readonly to: string },
   ): Promise<readonly OperationalRollup[]>;
+  listDestinations(
+    context: TenantContext,
+    input: {
+      readonly limit: number;
+      readonly cursor?: string;
+      readonly partnerId?: Partner["partnerId"];
+    },
+  ): Promise<Page<Destination>>;
+  countDeliveriesByState(
+    context: TenantContext,
+    state: DeliveryExecution["state"],
+  ): Promise<number>;
+  getCircuitState(
+    context: TenantContext,
+    destinationId: Destination["destinationId"],
+  ): Promise<CircuitRuntimeState>;
   createReplay(input: {
     readonly context: TenantContext;
     readonly requestHash: string;

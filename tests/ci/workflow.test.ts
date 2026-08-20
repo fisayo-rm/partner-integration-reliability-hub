@@ -25,6 +25,7 @@ test("pull-request workflow runs Stage A and the local platform/integration smok
       "Unit tests",
       "Security test gate",
       "Build all workspaces",
+      "Explicit console production build",
       "High-severity dependency audit",
       "Source and configuration secret scan",
     ]),
@@ -44,4 +45,7 @@ test("pull-request workflow runs Stage A and the local platform/integration smok
   expect(
     jobs["local-platform"].steps.map((step: { name?: string }) => step.name),
   ).toContain("Verify Compose topology");
+  expect(
+    jobs["local-platform"].steps.map((step: { name?: string }) => step.name),
+  ).toContain("Install Playwright Chromium");
 });

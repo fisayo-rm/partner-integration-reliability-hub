@@ -62,6 +62,9 @@ test("M06 exposes tenant-authenticated search and rejects viewer replay", async 
     getDeliveryDetail: async () => undefined,
     listAudit: async () => ({ items: [] }),
     getRollups: async () => [],
+    countDeliveriesByState: async () => 0,
+    listDestinations: async () => ({ items: [] }),
+    getCircuitState: async () => ({ state: "CLOSED", version: 0 }),
     createReplay: async () => ({ kind: "conflict" as const }),
   };
   const app = await buildApi({
@@ -96,6 +99,9 @@ test("M06 exposes tenant-authenticated search and rejects viewer replay", async 
       (await app.inject({ url: "/api/v1/events", headers })).statusCode,
     ).toBe(200);
     expect(
+      (await app.inject({ url: "/api/v1/session", headers })).json(),
+    ).toEqual({ actorId: "viewer", tenantId, role: "viewer" });
+    expect(
       (
         await app.inject({
           url: "/api/v1/events/evt_01J0A1B2C3D4E5F6G7H8J9K0MN",
@@ -106,14 +112,16 @@ test("M06 exposes tenant-authenticated search and rejects viewer replay", async 
     expect(
       (await app.inject({ url: "/api/v1/deliveries", headers })).statusCode,
     ).toBe(200);
-    expect(
-      (
-        await app.inject({
-          url: "/api/v1/deliveries/dlv_01J0A1B2C3D4E5F6G7H8J9K0MN",
-          headers,
-        })
-      ).statusCode,
-    ).toBe(404);
+    const missingDelivery = await app.inject({
+      url: "/api/v1/deliveries/dlv_01J0A1B2C3D4E5F6G7H8J9K0MN",
+      headers,
+    });
+    expect(missingDelivery.statusCode).toBe(404);
+    expect(missingDelivery.json().error).toMatchObject({
+      code: "NOT_FOUND",
+      requestId: expect.any(String),
+      correlationId: expect.stringMatching(/^cor_/),
+    });
     expect(
       (await app.inject({ url: "/api/v1/audit-logs", headers })).statusCode,
     ).toBe(200);

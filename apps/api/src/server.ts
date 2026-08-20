@@ -191,6 +191,10 @@ const app = await buildApi({
   requestId: () => id("req"),
   logger: runtime.logger,
   telemetry: runtime.telemetry,
+  consoleOrigins: (process.env.CONSOLE_ORIGIN ?? "http://localhost:5173")
+    .split(",")
+    .map((value) => value.trim())
+    .filter(Boolean),
 });
 for (const signal of ["SIGINT", "SIGTERM"] as const)
   process.on(signal, () => void app.close());

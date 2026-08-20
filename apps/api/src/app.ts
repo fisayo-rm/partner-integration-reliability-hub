@@ -1,4 +1,5 @@
 import swagger from "@fastify/swagger";
+import cors from "@fastify/cors";
 import Fastify, {
   type FastifyInstance,
   type preHandlerHookHandler,
@@ -21,6 +22,7 @@ import {
   deliverySearchQuerySchema,
   auditSearchQuerySchema,
   rollupQuerySchema,
+  sessionResponseSchema,
   paginationCursorPayloadSchema,
   eventAcceptanceResponseSchema,
   eventStatusResponseSchema,
@@ -45,7 +47,9 @@ import {
   type ConsoleAuthenticator,
   type ProducerAuthenticator,
 } from "@pirh/auth";
+import { replayEligibility } from "@pirh/domain";
 import type {
+  CircuitRuntimeState,
   Destination,
   Partner,
   TenantContext,
@@ -87,6 +91,7 @@ export interface ApiDependencies {
   readonly requestId?: () => string;
   readonly logger?: RuntimeLogger;
   readonly telemetry?: import("@pirh/application").Telemetry;
+  readonly consoleOrigins?: readonly string[];
 }
 
 function cursor(secret: string, value: string): string {
@@ -196,7 +201,7 @@ function operationCursor(input: {
   });
   return cursor(input.secret, value);
 }
-function publicDestination(value: Destination) {
+function publicDestination(value: Destination, circuit?: CircuitRuntimeState) {
   const rest = { ...value } as Record<string, unknown>;
   delete rest.secretReferences;
   const authConfiguration = value.authConfiguration;
@@ -206,6 +211,7 @@ function publicDestination(value: Destination) {
     ...rest,
     authConfiguration,
     credential: { alias, configured: alias !== undefined },
+    ...(circuit === undefined ? {} : { circuit }),
   };
 }
 function error(
@@ -213,8 +219,20 @@ function error(
   code: number,
   name: string,
   message: string,
+  request?: { readonly id: string },
 ) {
-  return reply.code(code).send({ error: { code: name, message } });
+  return reply.code(code).send({
+    error: {
+      code: name,
+      message,
+      ...(request === undefined
+        ? {}
+        : {
+            requestId: request.id,
+            correlationId: `cor_${request.id.slice(4)}`,
+          }),
+    },
+  });
 }
 
 export async function buildApi(
@@ -229,6 +247,18 @@ export async function buildApi(
             dependencies.requestId?.() ?? "req_00000000000000000000000000",
         },
   );
+  await app.register(cors, {
+    origin(origin, callback) {
+      if (
+        origin === undefined ||
+        dependencies.consoleOrigins === undefined ||
+        dependencies.consoleOrigins.includes(origin)
+      )
+        callback(null, true);
+      else callback(null, false);
+    },
+    credentials: false,
+  });
   app.addContentTypeParser(
     "application/json",
     { parseAs: "buffer" },
@@ -495,21 +525,29 @@ export async function buildApi(
     const mapError = async (
       handler: () => Promise<unknown>,
       reply: { code(code: number): { send(value: unknown): unknown } },
+      request?: { readonly id: string },
     ) => {
       try {
         return await handler();
       } catch (caught) {
         const message = caught instanceof Error ? caught.message : "INTERNAL";
         if (message === "NOT_FOUND")
-          return error(reply, 404, message, "Resource not found.");
+          return error(reply, 404, message, "Resource not found.", request);
         if (message === "PRECONDITION_FAILED")
-          return error(reply, 412, message, "Resource version does not match.");
+          return error(
+            reply,
+            412,
+            message,
+            "Resource version does not match.",
+            request,
+          );
         if (message === "CONFLICT")
           return error(
             reply,
             409,
             message,
             "The resource conflicts with existing configuration.",
+            request,
           );
         if (message.endsWith("_LIMIT"))
           return error(
@@ -517,26 +555,37 @@ export async function buildApi(
             409,
             message,
             "Demo configuration limit reached.",
+            request,
           );
-        return error(reply, 400, "VALIDATION_ERROR", "The request is invalid.");
+        return error(
+          reply,
+          400,
+          "VALIDATION_ERROR",
+          "The request is invalid.",
+          request,
+        );
       }
     };
     app.get(
       "/api/v1/partners",
       { preHandler: authenticated },
       async (request, reply) =>
-        mapError(async () => {
-          const result = await control.repository.listPartners(
-            context(request),
-            page(request, control.cursorSecret),
-          );
-          return {
-            items: result.items,
-            ...(result.cursor === undefined
-              ? {}
-              : { cursor: cursor(control.cursorSecret, result.cursor) }),
-          };
-        }, reply),
+        mapError(
+          async () => {
+            const result = await control.repository.listPartners(
+              context(request),
+              page(request, control.cursorSecret),
+            );
+            return {
+              items: result.items,
+              ...(result.cursor === undefined
+                ? {}
+                : { cursor: cursor(control.cursorSecret, result.cursor) }),
+            };
+          },
+          reply,
+          request,
+        ),
     );
     app.post(
       "/api/v1/partners",
@@ -555,129 +604,199 @@ export async function buildApi(
       "/api/v1/partners/:partnerId",
       { preHandler: authenticated },
       async (request, reply) =>
-        mapError(async () => {
-          const partner = await control.repository.getPartner(
-            context(request),
-            (request.params as { partnerId: Partner["partnerId"] }).partnerId,
-          );
-          if (partner === undefined) throw new Error("NOT_FOUND");
-          return partner;
-        }, reply),
+        mapError(
+          async () => {
+            const partner = await control.repository.getPartner(
+              context(request),
+              (request.params as { partnerId: Partner["partnerId"] }).partnerId,
+            );
+            if (partner === undefined) throw new Error("NOT_FOUND");
+            return partner;
+          },
+          reply,
+          request,
+        ),
+    );
+    app.get(
+      "/api/v1/destinations",
+      { preHandler: authenticated },
+      async (request, reply) =>
+        mapError(
+          async () => {
+            const query = (request.query ?? {}) as { partnerId?: unknown };
+            if (
+              query.partnerId !== undefined &&
+              (typeof query.partnerId !== "string" ||
+                query.partnerId.length === 0)
+            )
+              throw new Error("VALIDATION_ERROR");
+            const result = await control.repository.listDestinations(
+              context(request),
+              {
+                ...page(request, control.cursorSecret),
+                ...(query.partnerId === undefined
+                  ? {}
+                  : { partnerId: query.partnerId as Destination["partnerId"] }),
+              },
+            );
+            const items = await Promise.all(
+              result.items.map(async (destination) =>
+                publicDestination(
+                  destination,
+                  await control.repository.getCircuitState(
+                    context(request),
+                    destination.destinationId,
+                  ),
+                ),
+              ),
+            );
+            return {
+              items,
+              ...(result.cursor === undefined
+                ? {}
+                : { cursor: cursor(control.cursorSecret, result.cursor) }),
+            };
+          },
+          reply,
+          request,
+        ),
     );
     app.patch(
       "/api/v1/partners/:partnerId",
       { preHandler: [authenticated, admin] },
       async (request, reply) =>
-        mapError(async () => {
-          const partner = await control.repository.getPartner(
-            context(request),
-            (request.params as { partnerId: Partner["partnerId"] }).partnerId,
-          );
-          if (partner === undefined) throw new Error("NOT_FOUND");
-          const match = request.headers["if-match"];
-          if (typeof match !== "string" || !/^"[1-9][0-9]*"$/.test(match))
-            throw new Error("PRECONDITION_FAILED");
-          return control.service.updatePartner(
-            context(request),
-            partner,
-            Number(match.slice(1, -1)),
-            updatePartnerRequestSchema.parse(request.body) as never,
-          );
-        }, reply),
+        mapError(
+          async () => {
+            const partner = await control.repository.getPartner(
+              context(request),
+              (request.params as { partnerId: Partner["partnerId"] }).partnerId,
+            );
+            if (partner === undefined) throw new Error("NOT_FOUND");
+            const match = request.headers["if-match"];
+            if (typeof match !== "string" || !/^"[1-9][0-9]*"$/.test(match))
+              throw new Error("PRECONDITION_FAILED");
+            return control.service.updatePartner(
+              context(request),
+              partner,
+              Number(match.slice(1, -1)),
+              updatePartnerRequestSchema.parse(request.body) as never,
+            );
+          },
+          reply,
+          request,
+        ),
     );
     app.post(
       "/api/v1/partners/:partnerId/destinations",
       { preHandler: [authenticated, admin] },
       async (request, reply) =>
-        mapError(async () => {
-          const input = createDestinationRequestSchema.parse(request.body);
-          const { authentication, ...configuration } = input;
-          const partnerId = (
-            request.params as { partnerId: Destination["partnerId"] }
-          ).partnerId;
-          return publicDestination(
-            await control.service.createDestination(context(request), {
-              ...configuration,
-              partnerId,
-              authType: authentication.type,
-              authConfiguration:
-                authentication.type === "api_key"
-                  ? {
-                      headerName: authentication.headerName,
-                      idempotencyHeader: authentication.idempotencyHeader,
-                    }
-                  : {
-                      tokenUrl: authentication.tokenUrl,
-                      clientId: authentication.clientId,
-                      scopes: authentication.scopes,
-                      authenticationStyle: authentication.authenticationStyle,
-                    },
-              credential: authentication.credential,
-            } as never),
-          );
-        }, reply),
+        mapError(
+          async () => {
+            const input = createDestinationRequestSchema.parse(request.body);
+            const { authentication, ...configuration } = input;
+            const partnerId = (
+              request.params as { partnerId: Destination["partnerId"] }
+            ).partnerId;
+            return publicDestination(
+              await control.service.createDestination(context(request), {
+                ...configuration,
+                partnerId,
+                authType: authentication.type,
+                authConfiguration:
+                  authentication.type === "api_key"
+                    ? {
+                        headerName: authentication.headerName,
+                        idempotencyHeader: authentication.idempotencyHeader,
+                      }
+                    : {
+                        tokenUrl: authentication.tokenUrl,
+                        clientId: authentication.clientId,
+                        scopes: authentication.scopes,
+                        authenticationStyle: authentication.authenticationStyle,
+                      },
+                credential: authentication.credential,
+              } as never),
+            );
+          },
+          reply,
+          request,
+        ),
     );
     app.get(
       "/api/v1/destinations/:destinationId",
       { preHandler: authenticated },
       async (request, reply) =>
-        mapError(async () => {
-          const destination = await control.repository.getDestination(
-            context(request),
-            (request.params as { destinationId: Destination["destinationId"] })
-              .destinationId,
-          );
-          if (destination === undefined) throw new Error("NOT_FOUND");
-          return publicDestination(destination);
-        }, reply),
+        mapError(
+          async () => {
+            const destination = await control.repository.getDestination(
+              context(request),
+              (
+                request.params as {
+                  destinationId: Destination["destinationId"];
+                }
+              ).destinationId,
+            );
+            if (destination === undefined) throw new Error("NOT_FOUND");
+            return publicDestination(destination);
+          },
+          reply,
+          request,
+        ),
     );
     app.patch(
       "/api/v1/destinations/:destinationId",
       { preHandler: [authenticated, admin] },
       async (request, reply) =>
-        mapError(async () => {
-          const destination = await control.repository.getDestination(
-            context(request),
-            (request.params as { destinationId: Destination["destinationId"] })
-              .destinationId,
-          );
-          if (destination === undefined) throw new Error("NOT_FOUND");
-          const match = request.headers["if-match"];
-          if (typeof match !== "string" || !/^"[1-9][0-9]*"$/.test(match))
-            throw new Error("PRECONDITION_FAILED");
-          const input = updateDestinationRequestSchema.parse(request.body);
-          const { authentication, ...configuration } = input;
-          const changed = {
-            ...configuration,
-            ...(authentication === undefined
-              ? {}
-              : {
-                  authType: authentication.type,
-                  authConfiguration:
-                    authentication.type === "api_key"
-                      ? {
-                          headerName: authentication.headerName,
-                          idempotencyHeader: authentication.idempotencyHeader,
-                        }
-                      : {
-                          tokenUrl: authentication.tokenUrl,
-                          clientId: authentication.clientId,
-                          scopes: authentication.scopes,
-                          authenticationStyle:
-                            authentication.authenticationStyle,
-                        },
-                  credential: authentication.credential,
-                }),
-          };
-          return publicDestination(
-            await control.service.updateDestination(
+        mapError(
+          async () => {
+            const destination = await control.repository.getDestination(
               context(request),
-              destination,
-              Number(match.slice(1, -1)),
-              changed as never,
-            ),
-          );
-        }, reply),
+              (
+                request.params as {
+                  destinationId: Destination["destinationId"];
+                }
+              ).destinationId,
+            );
+            if (destination === undefined) throw new Error("NOT_FOUND");
+            const match = request.headers["if-match"];
+            if (typeof match !== "string" || !/^"[1-9][0-9]*"$/.test(match))
+              throw new Error("PRECONDITION_FAILED");
+            const input = updateDestinationRequestSchema.parse(request.body);
+            const { authentication, ...configuration } = input;
+            const changed = {
+              ...configuration,
+              ...(authentication === undefined
+                ? {}
+                : {
+                    authType: authentication.type,
+                    authConfiguration:
+                      authentication.type === "api_key"
+                        ? {
+                            headerName: authentication.headerName,
+                            idempotencyHeader: authentication.idempotencyHeader,
+                          }
+                        : {
+                            tokenUrl: authentication.tokenUrl,
+                            clientId: authentication.clientId,
+                            scopes: authentication.scopes,
+                            authenticationStyle:
+                              authentication.authenticationStyle,
+                          },
+                    credential: authentication.credential,
+                  }),
+            };
+            return publicDestination(
+              await control.service.updateDestination(
+                context(request),
+                destination,
+                Number(match.slice(1, -1)),
+                changed as never,
+              ),
+            );
+          },
+          reply,
+          request,
+        ),
     );
     app.post(
       "/api/v1/transformations",
@@ -704,6 +823,23 @@ export async function buildApi(
                 transformationId: TransformationVersion["transformationId"];
               }
             ).transformationId,
+            page(request, control.cursorSecret),
+          );
+          return {
+            items: result.items,
+            ...(result.cursor === undefined
+              ? {}
+              : { cursor: cursor(control.cursorSecret, result.cursor) }),
+          };
+        }, reply),
+    );
+    app.get(
+      "/api/v1/transformations",
+      { preHandler: authenticated },
+      async (request, reply) =>
+        mapError(async () => {
+          const result = await control.repository.listTransformations(
+            context(request),
             page(request, control.cursorSecret),
           );
           return {
@@ -849,6 +985,7 @@ export async function buildApi(
     const mapOperation = async (
       handler: () => Promise<unknown>,
       reply: { code(code: number): { send(value: unknown): unknown } },
+      request: { readonly id: string },
     ) => {
       try {
         return await handler();
@@ -856,21 +993,40 @@ export async function buildApi(
         const code =
           caught instanceof Error ? caught.message : "VALIDATION_ERROR";
         if (code === "NOT_FOUND")
-          return error(reply, 404, code, "Resource not found.");
+          return error(reply, 404, code, "Resource not found.", request);
         if (code === "FORBIDDEN")
-          return error(reply, 403, code, "Permission denied.");
+          return error(reply, 403, code, "Permission denied.", request);
         if (code === "IDEMPOTENCY_KEY_REUSED")
           return error(
             reply,
             409,
             code,
             "The idempotency key was used with a different request.",
+            request,
           );
         if (code.startsWith("REPLAY_"))
-          return error(reply, 409, code, "Delivery cannot be replayed.");
+          return error(
+            reply,
+            409,
+            code,
+            "Delivery cannot be replayed.",
+            request,
+          );
         if (code === "INVALID_CURSOR")
-          return error(reply, 400, code, "The pagination cursor is invalid.");
-        return error(reply, 400, "VALIDATION_ERROR", "The request is invalid.");
+          return error(
+            reply,
+            400,
+            code,
+            "The pagination cursor is invalid.",
+            request,
+          );
+        return error(
+          reply,
+          400,
+          "VALIDATION_ERROR",
+          "The request is invalid.",
+          request,
+        );
       }
     };
     const operationInput = (
@@ -904,240 +1060,319 @@ export async function buildApi(
             now: now(),
           });
     app.get(
+      "/api/v1/session",
+      { preHandler: authenticated },
+      async (request) => {
+        const current = operationContext(request);
+        if (current.role === undefined) throw new AuthenticationError(403);
+        return sessionResponseSchema.parse({
+          actorId: current.actorId,
+          tenantId: current.tenantId,
+          role: current.role,
+        });
+      },
+    );
+    app.get(
       "/api/v1/events",
       { preHandler: authenticated },
       async (request, reply) =>
-        mapOperation(async () => {
-          const parsed = eventSearchQuerySchema.parse(request.query) as Record<
-            string,
-            unknown
-          >;
-          const page = operationInput(request, "events", parsed);
-          const exact = [
-            parsed.eventId,
-            parsed.correlationId,
-            parsed.idempotencyKey,
-          ].filter(Boolean);
-          if (exact.length > 1) throw new Error("VALIDATION_ERROR");
-          const result = await operations.repository.searchEvents(
-            operationContext(request),
-            {
-              ...page,
-              eventId: parsed.eventId as never,
-              correlationId: parsed.correlationId as never,
-              idempotencyKeyHash:
-                typeof parsed.idempotencyKey === "string"
-                  ? createHash("sha256")
-                      .update(parsed.idempotencyKey)
-                      .digest("hex")
-                  : undefined,
-              eventType: parsed.eventType as string | undefined,
-              status: parsed.status as string | undefined,
-            },
-          );
-          const cursor = responseCursor(
-            operationContext(request),
-            page.endpointFingerprint,
-            result.cursor,
-          );
-          return {
-            items: result.items,
-            ...(cursor === undefined ? {} : { cursor }),
-          };
-        }, reply),
+        mapOperation(
+          async () => {
+            const parsed = eventSearchQuerySchema.parse(
+              request.query,
+            ) as Record<string, unknown>;
+            const page = operationInput(request, "events", parsed);
+            const exact = [
+              parsed.eventId,
+              parsed.correlationId,
+              parsed.idempotencyKey,
+            ].filter(Boolean);
+            if (exact.length > 1) throw new Error("VALIDATION_ERROR");
+            const result = await operations.repository.searchEvents(
+              operationContext(request),
+              {
+                ...page,
+                eventId: parsed.eventId as never,
+                correlationId: parsed.correlationId as never,
+                idempotencyKeyHash:
+                  typeof parsed.idempotencyKey === "string"
+                    ? createHash("sha256")
+                        .update(parsed.idempotencyKey)
+                        .digest("hex")
+                    : undefined,
+                eventType: parsed.eventType as string | undefined,
+                status: parsed.status as string | undefined,
+              },
+            );
+            const cursor = responseCursor(
+              operationContext(request),
+              page.endpointFingerprint,
+              result.cursor,
+            );
+            return {
+              items: result.items,
+              ...(cursor === undefined ? {} : { cursor }),
+            };
+          },
+          reply,
+          request,
+        ),
     );
     app.get(
       "/api/v1/events/:eventId",
       { preHandler: eventRead },
       async (request, reply) =>
-        mapOperation(async () => {
-          const detail = await operations.repository.getEventDetail(
-            operationContext(request),
-            (request.params as { eventId: never }).eventId,
-          );
-          if (detail === undefined) throw new Error("NOT_FOUND");
-          if (operationContext(request).actorType === "api_client")
-            return eventStatusResponseSchema.parse({
-              eventId: detail.event.eventId,
-              correlationId: detail.event.correlationId,
-              eventType: detail.event.eventType,
-              acceptedAt: detail.event.acceptedAt,
-              status: detail.event.status,
-            });
-          return detail;
-        }, reply),
+        mapOperation(
+          async () => {
+            const detail = await operations.repository.getEventDetail(
+              operationContext(request),
+              (request.params as { eventId: never }).eventId,
+            );
+            if (detail === undefined) throw new Error("NOT_FOUND");
+            if (operationContext(request).actorType === "api_client")
+              return eventStatusResponseSchema.parse({
+                eventId: detail.event.eventId,
+                correlationId: detail.event.correlationId,
+                eventType: detail.event.eventType,
+                acceptedAt: detail.event.acceptedAt,
+                status: detail.event.status,
+              });
+            return detail;
+          },
+          reply,
+          request,
+        ),
     );
     app.get(
       "/api/v1/deliveries",
       { preHandler: authenticated },
       async (request, reply) =>
-        mapOperation(async () => {
-          const parsed = deliverySearchQuerySchema.parse(
-            request.query,
-          ) as Record<string, unknown>;
-          const page = operationInput(request, "deliveries", parsed);
-          const exact = [parsed.deliveryId, parsed.correlationId].filter(
-            Boolean,
-          );
-          if (exact.length > 1) throw new Error("VALIDATION_ERROR");
-          const result = await operations.repository.searchDeliveries(
-            operationContext(request),
-            {
-              ...page,
-              deliveryId: parsed.deliveryId as never,
-              correlationId: parsed.correlationId as never,
-              partnerId: parsed.partnerId as string | undefined,
-              destinationId: parsed.destinationId as string | undefined,
-              status: parsed.status as string | undefined,
-              terminalFailure: parsed.terminalFailure as boolean | undefined,
-            },
-          );
-          const cursor = responseCursor(
-            operationContext(request),
-            page.endpointFingerprint,
-            result.cursor,
-          );
-          return {
-            items: result.items,
-            ...(cursor === undefined ? {} : { cursor }),
-          };
-        }, reply),
+        mapOperation(
+          async () => {
+            const parsed = deliverySearchQuerySchema.parse(
+              request.query,
+            ) as Record<string, unknown>;
+            const page = operationInput(request, "deliveries", parsed);
+            const exact = [parsed.deliveryId, parsed.correlationId].filter(
+              Boolean,
+            );
+            if (exact.length > 1) throw new Error("VALIDATION_ERROR");
+            const result = await operations.repository.searchDeliveries(
+              operationContext(request),
+              {
+                ...page,
+                deliveryId: parsed.deliveryId as never,
+                correlationId: parsed.correlationId as never,
+                partnerId: parsed.partnerId as string | undefined,
+                destinationId: parsed.destinationId as string | undefined,
+                status: parsed.status as string | undefined,
+                terminalFailure: parsed.terminalFailure as boolean | undefined,
+              },
+            );
+            const cursor = responseCursor(
+              operationContext(request),
+              page.endpointFingerprint,
+              result.cursor,
+            );
+            return {
+              items: result.items,
+              ...(cursor === undefined ? {} : { cursor }),
+            };
+          },
+          reply,
+          request,
+        ),
     );
     app.get(
       "/api/v1/deliveries/:deliveryId",
       { preHandler: authenticated },
       async (request, reply) =>
-        mapOperation(async () => {
-          const detail = await operations.repository.getDeliveryDetail(
-            operationContext(request),
-            (request.params as { deliveryId: never }).deliveryId,
-          );
-          if (detail === undefined) throw new Error("NOT_FOUND");
-          return {
-            ...detail,
-            delivery: {
-              ...detail.delivery,
-              transformedPayload: redactedJson(
-                detail.delivery.transformedPayload,
-                detail.delivery.configSnapshot.redactionPaths,
-              ),
-              configSnapshot: {
-                ...detail.delivery.configSnapshot,
-                secretReferenceNames: [],
-                authConfiguration: {},
+        mapOperation(
+          async () => {
+            const detail = await operations.repository.getDeliveryDetail(
+              operationContext(request),
+              (request.params as { deliveryId: never }).deliveryId,
+            );
+            if (detail === undefined) throw new Error("NOT_FOUND");
+            const current = operationContext(request);
+            const policy = replayEligibility({
+              state: detail.delivery.state,
+              ...(detail.delivery.lastFailureCategory === undefined
+                ? {}
+                : { failureCategory: detail.delivery.lastFailureCategory }),
+              correctionConfirmed: false,
+            });
+            return {
+              ...detail,
+              delivery: {
+                ...detail.delivery,
+                transformedPayload: redactedJson(
+                  detail.delivery.transformedPayload,
+                  detail.delivery.configSnapshot.redactionPaths,
+                ),
+                configSnapshot: {
+                  ...detail.delivery.configSnapshot,
+                  secretReferenceNames: [],
+                  authConfiguration: {},
+                },
               },
-            },
-          };
-        }, reply),
+              replayEligibility: {
+                allowed:
+                  (current.role === "admin" || current.role === "operator") &&
+                  (detail.delivery.state === "dead_lettered" ||
+                    policy.requiresCorrection),
+                requiresCorrection: policy.requiresCorrection,
+              },
+            };
+          },
+          reply,
+          request,
+        ),
     );
     app.post(
       "/api/v1/deliveries/:deliveryId/replays",
       { preHandler: authenticated },
       async (request, reply) =>
-        mapOperation(async () => {
-          const key = request.headers["idempotency-key"];
-          if (typeof key !== "string" || key.length < 1 || key.length > 256)
-            throw new Error("VALIDATION_ERROR");
-          const body = replayRequestSchema.parse(request.body);
-          const result = replayResponseSchema.parse(
-            await operations.service.replay(operationContext(request), {
-              deliveryId: (request.params as { deliveryId: never }).deliveryId,
-              idempotencyKey: key,
-              reason: body.reason,
-              correctionConfirmed: body.correctionConfirmed ?? false,
-            }),
-          );
-          return reply.code(result.previouslyAccepted ? 200 : 202).send(result);
-        }, reply),
+        mapOperation(
+          async () => {
+            const key = request.headers["idempotency-key"];
+            if (typeof key !== "string" || key.length < 1 || key.length > 256)
+              throw new Error("VALIDATION_ERROR");
+            const body = replayRequestSchema.parse(request.body);
+            const result = replayResponseSchema.parse(
+              await operations.service.replay(operationContext(request), {
+                deliveryId: (request.params as { deliveryId: never })
+                  .deliveryId,
+                idempotencyKey: key,
+                reason: body.reason,
+                correctionConfirmed: body.correctionConfirmed ?? false,
+              }),
+            );
+            return reply
+              .code(result.previouslyAccepted ? 200 : 202)
+              .send(result);
+          },
+          reply,
+          request,
+        ),
     );
     app.get(
       "/api/v1/audit-logs",
       { preHandler: authenticated },
       async (request, reply) =>
-        mapOperation(async () => {
-          const parsed = auditSearchQuerySchema.parse(request.query) as Record<
-            string,
-            unknown
-          >;
-          const page = operationInput(request, "audit-logs", parsed);
-          const result = await operations.repository.listAudit(
-            operationContext(request),
-            {
-              ...page,
-              status: parsed.action as string | undefined,
-              partnerId: parsed.actorId as string | undefined,
-              destinationId: parsed.targetType as string | undefined,
-              eventType: parsed.targetId as string | undefined,
-            },
-          );
-          const cursor = responseCursor(
-            operationContext(request),
-            page.endpointFingerprint,
-            result.cursor,
-          );
-          return {
-            items: result.items,
-            ...(cursor === undefined ? {} : { cursor }),
-          };
-        }, reply),
+        mapOperation(
+          async () => {
+            const parsed = auditSearchQuerySchema.parse(
+              request.query,
+            ) as Record<string, unknown>;
+            const page = operationInput(request, "audit-logs", parsed);
+            const result = await operations.repository.listAudit(
+              operationContext(request),
+              {
+                ...page,
+                status: parsed.action as string | undefined,
+                partnerId: parsed.actorId as string | undefined,
+                destinationId: parsed.targetType as string | undefined,
+                eventType: parsed.targetId as string | undefined,
+              },
+            );
+            const cursor = responseCursor(
+              operationContext(request),
+              page.endpointFingerprint,
+              result.cursor,
+            );
+            return {
+              items: result.items,
+              ...(cursor === undefined ? {} : { cursor }),
+            };
+          },
+          reply,
+          request,
+        ),
     );
     app.get(
       "/api/v1/operational-rollups",
       { preHandler: authenticated },
       async (request, reply) =>
-        mapOperation(async () => {
-          const parsed = rollupQuerySchema.parse(request.query) as Record<
-            string,
-            unknown
-          >;
-          const page = operationInput(request, "operational-rollups", {
-            ...parsed,
-            limit: 1,
-          });
-          const rollups = await operations.repository.getRollups(
-            operationContext(request),
-            page,
-          );
-          const addRollup = (
-            target: Record<string, number>,
-            value: (typeof rollups)[number],
-          ) => {
-            for (const [name, amount] of Object.entries(value))
-              if (typeof amount === "number")
-                target[name] = (target[name] ?? 0) + amount;
-            for (const [bucket, amount] of Object.entries(value.latencyBuckets))
-              target[`latencyBucket${bucket}`] =
-                (target[`latencyBucket${bucket}`] ?? 0) + amount;
-          };
-          const totals: Record<string, number> = {};
-          const destinations = new Map<string, Record<string, number>>();
-          for (const value of rollups) {
-            if (value.destinationId !== undefined) {
-              const destination = destinations.get(value.destinationId) ?? {};
-              addRollup(destination, value);
-              destinations.set(value.destinationId, destination);
-            } else addRollup(totals, value);
-          }
-          return {
-            from: page.from,
-            to: page.to,
-            totals,
-            averageLatencyMs:
-              (totals.latencyCount ?? 0) === 0
-                ? 0
-                : (totals.latencyTotalMs ?? 0) / (totals.latencyCount ?? 1),
-            destinations: [...destinations.entries()].map(
-              ([destinationId, totals]) => ({
-                destinationId,
-                totals,
-                averageLatencyMs:
-                  (totals.latencyCount ?? 0) === 0
-                    ? 0
-                    : (totals.latencyTotalMs ?? 0) / (totals.latencyCount ?? 1),
+        mapOperation(
+          async () => {
+            const parsed = rollupQuerySchema.parse(request.query) as Record<
+              string,
+              unknown
+            >;
+            const page = operationInput(request, "operational-rollups", {
+              ...parsed,
+              limit: 1,
+            });
+            const current = operationContext(request);
+            const [rollups, retrying, configured] = await Promise.all([
+              operations.repository.getRollups(current, page),
+              operations.repository.countDeliveriesByState(
+                current,
+                "retry_scheduled",
+              ),
+              operations.repository.listDestinations(current, { limit: 25 }),
+            ]);
+            const addRollup = (
+              target: Record<string, number>,
+              value: (typeof rollups)[number],
+            ) => {
+              for (const [name, amount] of Object.entries(value))
+                if (typeof amount === "number")
+                  target[name] = (target[name] ?? 0) + amount;
+              for (const [bucket, amount] of Object.entries(
+                value.latencyBuckets,
+              ))
+                target[`latencyBucket${bucket}`] =
+                  (target[`latencyBucket${bucket}`] ?? 0) + amount;
+            };
+            const totals: Record<string, number> = {};
+            const destinations = new Map<string, Record<string, number>>();
+            for (const value of rollups) {
+              if (value.destinationId !== undefined) {
+                const destination = destinations.get(value.destinationId) ?? {};
+                addRollup(destination, value);
+                destinations.set(value.destinationId, destination);
+              } else addRollup(totals, value);
+            }
+            const destinationSummaries = await Promise.all(
+              configured.items.map(async (destination) => {
+                const aggregate =
+                  destinations.get(destination.destinationId) ?? {};
+                const circuit = await operations.repository.getCircuitState(
+                  current,
+                  destination.destinationId,
+                );
+                return {
+                  destinationId: destination.destinationId,
+                  partnerId: destination.partnerId,
+                  name: destination.name,
+                  enabled: destination.enabled,
+                  circuit,
+                  totals: aggregate,
+                  averageLatencyMs:
+                    (aggregate.latencyCount ?? 0) === 0
+                      ? 0
+                      : (aggregate.latencyTotalMs ?? 0) /
+                        (aggregate.latencyCount ?? 1),
+                };
               }),
-            ),
-          };
-        }, reply),
+            );
+            return {
+              from: page.from,
+              to: page.to,
+              totals,
+              retryingCount: retrying,
+              averageLatencyMs:
+                (totals.latencyCount ?? 0) === 0
+                  ? 0
+                  : (totals.latencyTotalMs ?? 0) / (totals.latencyCount ?? 1),
+              destinations: destinationSummaries,
+            };
+          },
+          reply,
+          request,
+        ),
     );
   }
   return app;

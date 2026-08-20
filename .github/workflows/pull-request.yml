@@ -40,6 +40,8 @@ jobs:
         run: pnpm test:security
       - name: Build all workspaces
         run: pnpm build
+      - name: Explicit console production build
+        run: pnpm --filter @pirh/console build
       - name: High-severity dependency audit
         run: pnpm audit
       - name: Source and configuration secret scan
@@ -61,5 +63,7 @@ jobs:
           version: 10.18.2
       - name: Install with frozen lockfile
         run: pnpm install --frozen-lockfile
+      - name: Install Playwright Chromium
+        run: pnpm exec playwright install --with-deps chromium
       - name: Verify Compose topology
         run: pnpm local:verify

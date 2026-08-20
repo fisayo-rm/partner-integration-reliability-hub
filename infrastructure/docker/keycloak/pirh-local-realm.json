@@ -75,6 +75,24 @@
       "credentials": [
         { "type": "password", "value": "viewer-demo-only", "temporary": false }
       ]
+    },
+    {
+      "id": "44444444-4444-4444-8444-444444444444",
+      "username": "other-tenant-viewer@example.test",
+      "enabled": true,
+      "emailVerified": true,
+      "firstName": "Other",
+      "lastName": "Tenant Viewer",
+      "requiredActions": [],
+      "email": "other-tenant-viewer@example.test",
+      "realmRoles": ["viewer"],
+      "credentials": [
+        {
+          "type": "password",
+          "value": "other-viewer-demo-only",
+          "temporary": false
+        }
+      ]
     }
   ]
 }

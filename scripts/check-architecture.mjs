@@ -24,7 +24,7 @@ async function listTypeScriptFiles(directory) {
     const candidate = path.join(directory, entry.name);
     if (entry.isDirectory())
       files.push(...(await listTypeScriptFiles(candidate)));
-    if (entry.isFile() && candidate.endsWith(".ts")) files.push(candidate);
+    if (entry.isFile() && /\.tsx?$/.test(candidate)) files.push(candidate);
   }
   return files;
 }
@@ -152,10 +152,14 @@ export function inspectSources(sources) {
           path.posix.join(path.posix.dirname(sourcePath), moduleName),
         );
         const candidates = [
-          basePath.endsWith(".js")
-            ? `${basePath.slice(0, -3)}.ts`
+          basePath.endsWith(".js") || basePath.endsWith(".jsx")
+            ? `${basePath.replace(/\.jsx?$/, "")}.ts`
             : `${basePath}.ts`,
+          basePath.endsWith(".js") || basePath.endsWith(".jsx")
+            ? `${basePath.replace(/\.jsx?$/, "")}.tsx`
+            : `${basePath}.tsx`,
           `${basePath}/index.ts`,
+          `${basePath}/index.tsx`,
         ];
         const dependency = candidates.find((candidate) => candidate in sources);
         if (dependency) sourceDependencies.get(relativePath).add(dependency);

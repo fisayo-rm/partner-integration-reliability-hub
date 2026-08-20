@@ -9,6 +9,8 @@ import type { ClientId, TenantContext } from "@pirh/domain";
 
 const tenantId =
   "tenant_01J0A1B2C3D4E5F6G7H8J9K0MN" as TenantContext["tenantId"];
+const otherTenantId =
+  "tenant_01J0A1B2C3D4E5F6G7H8J9K0MO" as TenantContext["tenantId"];
 const clientId = "cli_01J0A1B2C3D4E5F6G7H8J9K0MN" as ClientId;
 const issuer =
   process.env.OIDC_ISSUER ?? "http://localhost:8080/realms/pirh-local";
@@ -51,10 +53,26 @@ const store = new LocalDynamoDbSecretStore(documentClient, {
   masterKeyBase64: masterKey,
 });
 const reference = { name: "producer-demo", version: "seed-v1" };
-const identities: readonly (readonly [string, string, string])[] = [
-  ["11111111-1111-4111-8111-111111111111", "admin", "local-admin"],
-  ["22222222-2222-4222-8222-222222222222", "operator", "local-operator"],
-  ["33333333-3333-4333-8333-333333333333", "viewer", "local-viewer"],
+const identities: readonly (readonly [
+  string,
+  string,
+  string,
+  TenantContext["tenantId"],
+])[] = [
+  ["11111111-1111-4111-8111-111111111111", "admin", "local-admin", tenantId],
+  [
+    "22222222-2222-4222-8222-222222222222",
+    "operator",
+    "local-operator",
+    tenantId,
+  ],
+  ["33333333-3333-4333-8333-333333333333", "viewer", "local-viewer", tenantId],
+  [
+    "44444444-4444-4444-8444-444444444444",
+    "viewer",
+    "other-tenant-viewer",
+    otherTenantId,
+  ],
 ];
 try {
   await store.resolve(seedContext, reference);
@@ -95,12 +113,21 @@ await persistence.putSeed([
     tenantId,
     createdAt: now,
   },
-  ...identities.map(([subject, role, userId]) => ({
+  {
+    ...key.tenant(otherTenantId),
+    entityType: "TENANT",
+    tenantId: otherTenantId,
+    name: "Other local demo tenant",
+    status: "active",
+    createdAt: now,
+    version: 1,
+  },
+  ...identities.map(([subject, role, userId, identityTenantId]) => ({
     ...key.identity(issuer, subject),
     entityType: "USER_IDENTITY",
     issuer,
     subject,
-    tenantId,
+    tenantId: identityTenantId,
     status: "active",
     role,
     userId,

@@ -113,6 +113,7 @@ async function verify(profile) {
   await pnpm(["demo:m04"]);
   await pnpm(["demo:m05"]);
   await pnpm(["demo:m06"]);
+  if (profile === undefined) await pnpm(["test:e2e"]);
   if (profile === "observability") {
     for (const [url, label, maxAttempts] of [
       ["http://localhost:13133/", "OpenTelemetry collector"],

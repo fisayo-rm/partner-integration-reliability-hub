@@ -41,3 +41,11 @@ test("relative source cycles are rejected", () => {
     "source dependency cycle: packages/domain/src/a.ts -> packages/domain/src/b.ts -> packages/domain/src/a.ts",
   );
 });
+
+test("console TSX is subject to the server-import boundary", () => {
+  expect(
+    inspectSources({
+      "apps/console/src/view.tsx": 'import { buildApi } from "@pirh/api";',
+    }),
+  ).toContain("apps/console may not import server implementation @pirh/api");
+});

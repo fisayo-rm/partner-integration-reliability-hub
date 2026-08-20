@@ -36,7 +36,7 @@ pnpm secret:scan
 pnpm audit
 ```
 
-## Local platform (M02)
+## Local platform and operations console (M08)
 
 Start Colima before using Docker on macOS:
 
@@ -50,20 +50,39 @@ pnpm local:up:observability
 ```
 
 The local environment uses disposable Docker volumes, DynamoDB Local, ElasticMQ,
-Keycloak, health-only mock partners, and service placeholders. It seeds one tenant,
-admin/operator/viewer mappings, and a producer client whose secret is AES-256-GCM
-encrypted in DynamoDB Local. The smoke suite checks both profiles and M02 DynamoDB/
-Keycloak integration behavior, then removes its isolated containers and volumes:
+Keycloak, two mock partners, and a Vite-built React operations console served on
+`http://localhost:5173`. The public API is at `http://localhost:3000` and its CORS
+allowlist is controlled by `CONSOLE_ORIGIN`. The console uses Authorization Code with
+PKCE and keeps its browser session in session storage.
+
+It seeds one operational tenant with admin, operator, and viewer mappings, plus a
+second-tenant viewer used solely to verify API tenant isolation. A local producer
+client and partner credentials are encrypted in DynamoDB Local and are never exposed
+by the API or console. The smoke suite checks both Compose profiles, integration
+behavior, M04–M07 demonstrations, and the M08 browser workflow, then removes its
+isolated containers and volumes:
 
 ```bash
 pnpm local:verify
 pnpm local:down
 ```
 
-The Keycloak users in `.env.example` are local-demo-only identities. M02 provides
-authentication hooks and persistence primitives, but no public business endpoint,
-event processing, partner delivery, or transformation execution; those begin in
-later milestones.
+The Keycloak users in `.env.example` are local-demo-only identities:
+
+- `admin@example.test` / `admin-demo-only` can manage partners, destinations,
+  transformations, and subscriptions.
+- `operator@example.test` / `operator-demo-only` can investigate and replay eligible
+  deliveries with an audited reason.
+- `viewer@example.test` / `viewer-demo-only` can view redacted operational data only.
+- `other-tenant-viewer@example.test` / `other-viewer-demo-only` exists only to prove
+  direct cross-tenant resource access is denied.
+
+For the primary operational story, run `pnpm local:up`, sign in as the operator,
+open Overview, search a delivery in Deliveries or Dead letters, review its redacted
+attempt/history evidence, and replay an eligible terminal delivery with a 10–1000
+character reason. The original delivery remains immutable. Use `pnpm demo:m06` in a
+separate terminal to produce a controlled dead-letter/replay story; its required
+environment values are supplied automatically by `pnpm local:verify`.
 
 ## Repository boundaries
 

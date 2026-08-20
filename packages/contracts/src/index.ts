@@ -97,6 +97,38 @@ export const apiErrorSchema = z
   .strict();
 export type ApiError = z.infer<typeof apiErrorSchema>;
 
+export const sessionResponseSchema = z
+  .object({
+    actorId: z.string().min(1).max(256),
+    tenantId: identifier("tenant"),
+    role: z.enum(["admin", "operator", "viewer"]),
+  })
+  .strict();
+export type SessionResponse = z.infer<typeof sessionResponseSchema>;
+
+export interface PaginatedResponse<Item> {
+  readonly items: readonly Item[];
+  readonly cursor?: string;
+}
+
+export interface TransformationSummaryResponse {
+  readonly transformationId: string;
+  readonly externalKey: string;
+  readonly latestVersion: number;
+}
+
+export interface DestinationHealthResponse {
+  readonly state: "CLOSED" | "OPEN" | "HALF_OPEN";
+  readonly consecutiveFailures: number;
+  readonly openedAt?: string;
+  readonly nextProbeAt?: string;
+}
+
+export interface ReplayEligibilityResponse {
+  readonly allowed: boolean;
+  readonly requiresCorrection: boolean;
+}
+
 const queueBase = {
   schemaVersion: z.literal(1),
   tenantId: identifier("tenant"),

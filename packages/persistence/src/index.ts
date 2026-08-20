@@ -45,6 +45,7 @@ import type {
   EventDetail,
   DeliveryDetail,
   OperationalSearchInput,
+  TransformationSummary,
 } from "@pirh/application";
 import {
   deriveEventStatus,
@@ -136,7 +137,7 @@ function deliveryIndexCategories(
 function hourOf(value: string): string {
   return value.slice(0, 13).replace(/[-:T]/g, "");
 }
-function rollupUpdates(input: {
+export function rollupUpdates(input: {
   readonly tableName: string;
   readonly tenantId: TenantContext["tenantId"];
   readonly destinationId: string;
@@ -145,6 +146,7 @@ function rollupUpdates(input: {
   readonly attempt: DeliveryAttempt;
   readonly delivery: DeliveryExecution;
 }): readonly unknown[] {
+  const isReplay = input.delivery.executionType === "REPLAY";
   const duration = input.attempt.durationMs ?? 0;
   const bucket =
     duration <= 100
@@ -159,25 +161,21 @@ function rollupUpdates(input: {
               ? "latencyLe2500"
               : "latencyGt2500";
   const values = {
-    ":attempt": 1,
-    ":success": input.attempt.outcome === "succeeded" ? 1 : 0,
-    ":failure": input.attempt.outcome === "failed" ? 1 : 0,
-    ":retry": input.delivery.state === "retry_scheduled" ? 1 : 0,
-    ":dead": input.delivery.state === "dead_lettered" ? 1 : 0,
-    ":replaySuccess":
-      input.delivery.executionType === "REPLAY" &&
-      input.delivery.state === "succeeded"
-        ? 1
-        : 0,
+    ":attempt": isReplay ? 0 : 1,
+    ":success": !isReplay && input.attempt.outcome === "succeeded" ? 1 : 0,
+    ":failure": !isReplay && input.attempt.outcome === "failed" ? 1 : 0,
+    ":retry": !isReplay && input.delivery.state === "retry_scheduled" ? 1 : 0,
+    ":dead": !isReplay && input.delivery.state === "dead_lettered" ? 1 : 0,
+    ":replaySuccess": isReplay && input.delivery.state === "succeeded" ? 1 : 0,
     ":replayFailure":
-      input.delivery.executionType === "REPLAY" &&
+      isReplay &&
       (input.delivery.state === "dead_lettered" ||
         input.delivery.state === "failed_terminal")
         ? 1
         : 0,
-    ":latency": duration,
-    ":latencyCount": 1,
-    ":bucket": 1,
+    ":latency": isReplay ? 0 : duration,
+    ":latencyCount": isReplay ? 0 : 1,
+    ":bucket": isReplay ? 0 : 1,
   };
   const expression =
     `ADD deliveryAttempts :attempt, deliverySuccesses :success, deliveryFailures :failure, ` +
@@ -330,6 +328,43 @@ export class DynamoPersistence
       ? { items }
       : { items, cursor: JSON.stringify(result.LastEvaluatedKey) };
   }
+  public async listDestinations(
+    context: TenantContext,
+    input: {
+      readonly limit: number;
+      readonly cursor?: string;
+      readonly partnerId?: Partner["partnerId"];
+    },
+  ): Promise<{
+    readonly items: readonly Destination[];
+    readonly cursor?: string;
+  }> {
+    const result = await this.client.send(
+      new QueryCommand({
+        TableName: this.config.coreTableName,
+        KeyConditionExpression: "PK = :pk AND begins_with(SK, :prefix)",
+        ExpressionAttributeValues: {
+          ":pk": `TENANT#${context.tenantId}`,
+          ":prefix": "DESTINATION#",
+          ...(input.partnerId === undefined
+            ? {}
+            : { ":partnerId": input.partnerId }),
+        },
+        ...(input.partnerId === undefined
+          ? {}
+          : { FilterExpression: "partnerId = :partnerId" }),
+        Limit: input.limit,
+        ExclusiveStartKey:
+          input.cursor === undefined ? undefined : JSON.parse(input.cursor),
+      }),
+    );
+    const items = (result.Items ?? [])
+      .filter((value) => !isExpired(value))
+      .map((value) => value as Destination);
+    return result.LastEvaluatedKey === undefined
+      ? { items }
+      : { items, cursor: JSON.stringify(result.LastEvaluatedKey) };
+  }
   public async listControlSubscriptions(
     context: TenantContext,
     input: { readonly limit: number; readonly cursor?: string },
@@ -381,6 +416,58 @@ export class DynamoPersistence
     const items = (result.Items ?? [])
       .filter((value) => !isExpired(value))
       .map((value) => value as TransformationVersion);
+    return result.LastEvaluatedKey === undefined
+      ? { items }
+      : { items, cursor: JSON.stringify(result.LastEvaluatedKey) };
+  }
+  public async listTransformations(
+    context: TenantContext,
+    input: { readonly limit: number; readonly cursor?: string },
+  ): Promise<{
+    readonly items: readonly TransformationSummary[];
+    readonly cursor?: string;
+  }> {
+    const result = await this.client.send(
+      new QueryCommand({
+        TableName: this.config.coreTableName,
+        KeyConditionExpression: "PK = :pk AND begins_with(SK, :prefix)",
+        ExpressionAttributeValues: {
+          ":pk": `TENANT#${context.tenantId}#EXTERNAL#TRANSFORMATION`,
+          ":prefix": "KEY#",
+        },
+        Limit: input.limit,
+        ExclusiveStartKey:
+          input.cursor === undefined ? undefined : JSON.parse(input.cursor),
+      }),
+    );
+    const items = await Promise.all(
+      (result.Items ?? [])
+        .filter((value) => !isExpired(value))
+        .map(async (value) => {
+          const transformationId =
+            value.transformationId as TransformationVersion["transformationId"];
+          const latest = await this.client.send(
+            new QueryCommand({
+              TableName: this.config.coreTableName,
+              KeyConditionExpression: "PK = :pk AND begins_with(SK, :prefix)",
+              ExpressionAttributeValues: {
+                ":pk": `TENANT#${context.tenantId}#TRANSFORMATION#${transformationId}`,
+                ":prefix": "VERSION#",
+              },
+              Limit: 1,
+              ScanIndexForward: false,
+            }),
+          );
+          const version = latest.Items?.[0] as
+            | TransformationVersion
+            | undefined;
+          return {
+            transformationId,
+            externalKey: String(value.SK).replace(/^KEY#/, ""),
+            latestVersion: version?.version ?? 0,
+          };
+        }),
+    );
     return result.LastEvaluatedKey === undefined
       ? { items }
       : { items, cursor: JSON.stringify(result.LastEvaluatedKey) };
@@ -684,6 +771,39 @@ export class DynamoPersistence
       ),
       ...(destinations.flat() as OperationalRollup[]),
     ];
+  }
+  public async countDeliveriesByState(
+    context: TenantContext,
+    state: DeliveryExecution["state"],
+  ): Promise<number> {
+    let cursor: Record<string, unknown> | undefined;
+    let count = 0;
+    do {
+      const result = await this.client.send(
+        new QueryCommand({
+          TableName: this.config.coreTableName,
+          KeyConditionExpression: "PK = :pk",
+          ExpressionAttributeValues: {
+            ":pk": `TENANT#${context.tenantId}#DELIVERY_INDEX#STATUS#${state}`,
+          },
+          Select: "COUNT",
+          ExclusiveStartKey: cursor,
+        }),
+      );
+      count += result.Count ?? 0;
+      cursor = result.LastEvaluatedKey as Record<string, unknown> | undefined;
+    } while (cursor !== undefined);
+    return count;
+  }
+  public async getCircuitState(
+    context: TenantContext,
+    destinationId: Destination["destinationId"],
+  ): Promise<CircuitRuntimeState> {
+    return (
+      (await this.getCore<CircuitRuntimeState>(
+        key.runtime(context.tenantId, destinationId, "CIRCUIT"),
+      )) ?? { state: "CLOSED", consecutiveFailures: 0, version: 0 }
+    );
   }
   public async createReplay(
     input: Parameters<OperationsRepository["createReplay"]>[0],
@@ -1830,7 +1950,7 @@ export class DynamoPersistence
           },
         });
       }
-      if (terminal) {
+      if (terminal && input.delivery.executionType === "ORIGINAL") {
         const hour = hourOf(input.delivery.updatedAt);
         const values = {
           ":failure": input.delivery.state === "failed_terminal" ? 1 : 0,

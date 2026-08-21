@@ -25,7 +25,7 @@
     "audit": "pnpm audit --audit-level high",
     "local:up": "docker compose --env-file .env.local up --build",
     "local:up:observability": "docker compose --env-file .env.local --profile observability up --build",
-    "local:down": "docker compose down --volumes --remove-orphans",
+    "local:down": "docker compose --profile observability down --volumes --remove-orphans",
     "local:verify": "node scripts/verify-local-platform.mjs",
     "demo:m04": "node scripts/demo-m04.mjs",
     "demo:m05": "node scripts/demo-m05.mjs",

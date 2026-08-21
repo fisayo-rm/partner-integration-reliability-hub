@@ -67,6 +67,10 @@ pnpm local:verify
 pnpm local:down
 ```
 
+`pnpm local:down` includes the observability profile, so it also removes local
+Grafana, Jaeger, Loki, Prometheus, and OpenTelemetry containers when they were
+started with `pnpm local:up:observability`.
+
 The Keycloak users in `.env.example` are local-demo-only identities:
 
 - `admin@example.test` / `admin-demo-only` can manage partners, destinations,

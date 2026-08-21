@@ -115,4 +115,34 @@ test("M08 console login, role gate, API redaction, and tenant boundary", async (
     }),
   });
   expect(validation.ok).toBeTruthy();
+
+  await page.getByRole("link", { name: "Partners" }).click();
+  await expect(
+    page.getByRole("heading", { name: "Partner configuration" }),
+  ).toBeVisible();
+  await page.locator(".content").evaluate((element) => {
+    element.scrollTop = element.scrollHeight;
+  });
+  await expect(page.getByRole("button", { name: "Sign out" })).toBeVisible();
+  expect(
+    await page.locator(".sidebar").evaluate((element) => {
+      const box = element.getBoundingClientRect();
+      const shellHeight = element.parentElement?.getBoundingClientRect().height;
+      return (
+        box.top === 0 && Math.round(box.height) === Math.round(shellHeight ?? 0)
+      );
+    }),
+  ).toBe(true);
+
+  await page.getByRole("button", { name: "Sign out" }).click();
+  await expect(page).toHaveURL(/\/login$/);
+  await page.getByRole("button", { name: "Sign in" }).click();
+  await expect(page.locator("#username")).toBeVisible();
+  await page.locator("#username").fill("viewer@example.test");
+  await page.locator("#password").fill("viewer-demo-only");
+  await page.locator("#kc-login").click();
+  await expect(page.getByText("viewer", { exact: true })).toBeVisible();
+  await expect(
+    page.getByRole("button", { name: "Replay delivery" }),
+  ).toHaveCount(0);
 });

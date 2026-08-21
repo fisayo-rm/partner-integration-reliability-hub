@@ -13,6 +13,9 @@
       "protocol": "openid-connect",
       "redirectUris": ["http://localhost:5173/*"],
       "webOrigins": ["http://localhost:5173"],
+      "attributes": {
+        "post.logout.redirect.uris": "http://localhost:5173/*"
+      },
       "standardFlowEnabled": true,
       "directAccessGrantsEnabled": true,
       "protocolMappers": [

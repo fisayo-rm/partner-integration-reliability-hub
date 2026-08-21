@@ -252,13 +252,8 @@ function AuthProvider({ children }: { readonly children: ReactNode }) {
       token: user?.access_token,
       session,
       ready,
-      signIn: () => manager.signinRedirect(),
-      signOut: async () => {
-        await manager.removeUser();
-        setUser(null);
-        setSession(undefined);
-        window.location.assign("/login");
-      },
+      signIn: () => manager.signinRedirect({ prompt: "login" }),
+      signOut: () => manager.signoutRedirect(),
     }),
     [ready, session, user?.access_token],
   );

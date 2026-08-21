@@ -10,6 +10,7 @@
 body {
   margin: 0;
   min-width: 1024px;
+  overflow: hidden;
 }
 button,
 input,
@@ -25,9 +26,10 @@ a {
   color: #175cd3;
 }
 .shell {
-  min-height: 100vh;
+  height: 100dvh;
   display: grid;
   grid-template-columns: 224px 1fr;
+  overflow: hidden;
 }
 .sidebar {
   background: #111b31;
@@ -36,6 +38,8 @@ a {
   flex-direction: column;
   padding: 22px 14px;
   gap: 28px;
+  min-height: 0;
+  overflow: hidden;
 }
 .brand {
   color: #fff;
@@ -77,6 +81,8 @@ a {
   width: min(1440px, 100%);
   padding: 34px 42px 64px;
   margin: 0 auto;
+  min-height: 0;
+  overflow-y: auto;
 }
 .page-header {
   display: flex;
@@ -483,9 +489,19 @@ textarea {
 @media (max-width: 1120px) {
   body {
     min-width: 0;
+    overflow: auto;
   }
   .shell {
+    height: auto;
+    min-height: 100vh;
     grid-template-columns: 174px 1fr;
+    overflow: visible;
+  }
+  .sidebar {
+    overflow: visible;
+  }
+  .content {
+    overflow: visible;
   }
   .content {
     padding: 24px;

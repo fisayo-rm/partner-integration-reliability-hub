@@ -145,7 +145,11 @@ const manager = new UserManager({
   scope: "openid profile email",
   userStore: new WebStorageStateStore({ store: window.sessionStorage }),
   stateStore: new WebStorageStateStore({ store: window.sessionStorage }),
-  automaticSilentRenew: false,
+  // Keycloak includes a refresh token in this Authorization Code with PKCE flow.
+  // oidc-client-ts uses it rather than an iframe when it renews the short-lived
+  // access token.
+  automaticSilentRenew: true,
+  accessTokenExpiringNotificationTimeInSeconds: 60,
   monitorSession: false,
 });
 
@@ -228,24 +232,65 @@ function AuthProvider({ children }: { readonly children: ReactNode }) {
   const [session, setSession] = useState<SessionResponse>();
   const [ready, setReady] = useState(false);
   useEffect(() => {
-    void manager
-      .getUser()
+    let active = true;
+    const clearExpiredSession = () => {
+      void manager.removeUser().finally(() => {
+        if (!active) return;
+        setUser(null);
+        setSession(undefined);
+      });
+    };
+    const restoreSession = async () => {
+      const stored = await manager.getUser();
+      if (stored === null || !stored.expired) return stored;
+      try {
+        return await manager.signinSilent();
+      } catch {
+        clearExpiredSession();
+        return null;
+      }
+    };
+    void restoreSession()
       .then((value) => {
-        setUser(value?.expired ? null : (value ?? null));
+        if (active) setUser(value);
       })
-      .finally(() => setReady(true));
-    const callback = (value: User) => setUser(value);
-    manager.events.addUserLoaded(callback);
-    return () => manager.events.removeUserLoaded(callback);
+      .finally(() => {
+        if (active) setReady(true);
+      });
+    const userLoaded = (value: User) => {
+      if (active) setUser(value);
+    };
+    manager.events.addUserLoaded(userLoaded);
+    manager.events.addSilentRenewError(clearExpiredSession);
+    manager.events.addAccessTokenExpired(clearExpiredSession);
+    return () => {
+      active = false;
+      manager.events.removeUserLoaded(userLoaded);
+      manager.events.removeSilentRenewError(clearExpiredSession);
+      manager.events.removeAccessTokenExpired(clearExpiredSession);
+    };
   }, []);
   useEffect(() => {
     if (user?.access_token === undefined) {
       setSession(undefined);
       return;
     }
+    let active = true;
+    setSession(undefined);
     void api<SessionResponse>(user.access_token, "/api/v1/session")
-      .then(setSession)
-      .catch(() => setSession(undefined));
+      .then((value) => {
+        if (active) setSession(value);
+      })
+      .catch(() => {
+        void manager.removeUser();
+        if (active) {
+          setUser(null);
+          setSession(undefined);
+        }
+      });
+    return () => {
+      active = false;
+    };
   }, [user?.access_token]);
   const value = useMemo<AuthValue>(
     () => ({

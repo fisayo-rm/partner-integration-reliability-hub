@@ -35,9 +35,7 @@ async function request(
   });
 }
 
-test("M08 console login, role gate, API redaction, and tenant boundary", async ({
-  page,
-}) => {
+async function signInWithOperator(page: import("@playwright/test").Page) {
   await page.goto("/login");
   await page.getByRole("button", { name: "Sign in" }).click();
   await page.locator("#username").fill("operator@example.test");
@@ -46,6 +44,31 @@ test("M08 console login, role gate, API redaction, and tenant boundary", async (
   await expect(
     page.getByRole("heading", { name: "Operational overview" }),
   ).toBeVisible();
+}
+
+async function expireStoredAccessToken(
+  page: import("@playwright/test").Page,
+  invalidateRefreshToken = false,
+) {
+  await page.evaluate((invalidate) => {
+    const key = Array.from({ length: sessionStorage.length }, (_, index) =>
+      sessionStorage.key(index),
+    ).find((entry) => entry?.startsWith("oidc.user:") === true);
+    if (typeof key !== "string") throw new Error("OIDC user was not stored.");
+    const user = JSON.parse(sessionStorage.getItem(key) ?? "{}") as {
+      expires_at?: number;
+      refresh_token?: string;
+    };
+    user.expires_at = Math.floor(Date.now() / 1_000) - 1;
+    if (invalidate) user.refresh_token = "invalid-refresh-token";
+    sessionStorage.setItem(key, JSON.stringify(user));
+  }, invalidateRefreshToken);
+}
+
+test("M08 console login, role gate, API redaction, and tenant boundary", async ({
+  page,
+}) => {
+  await signInWithOperator(page);
   await expect(page.getByText("operator", { exact: true })).toBeVisible();
 
   const [admin, viewer, otherTenant] = await Promise.all([
@@ -145,4 +168,28 @@ test("M08 console login, role gate, API redaction, and tenant boundary", async (
   await expect(
     page.getByRole("button", { name: "Replay delivery" }),
   ).toHaveCount(0);
+});
+
+test("M08 console renews an expired access token and ends an invalid session", async ({
+  page,
+}) => {
+  await signInWithOperator(page);
+  await expireStoredAccessToken(page);
+
+  const refreshed = page.waitForResponse(
+    (response) =>
+      response.url().endsWith("/protocol/openid-connect/token") &&
+      response.request().method() === "POST" &&
+      response.status() === 200,
+  );
+  await page.reload();
+  await refreshed;
+  await expect(
+    page.getByRole("heading", { name: "Operational overview" }),
+  ).toBeVisible();
+
+  await expireStoredAccessToken(page, true);
+  await page.reload();
+  await expect(page).toHaveURL(/\/login$/);
+  await expect(page.getByRole("button", { name: "Sign in" })).toBeVisible();
 });

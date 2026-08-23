@@ -126,3 +126,72 @@ test("M08 hydrates DynamoDB rollup counters into the operational read model", as
     latencyBuckets: { latencyLe100: 0, latencyGt2500: 2 },
   });
 });
+
+test("M08 excludes stale delivery index entries from operational lists", async () => {
+  const delivery = (deliveryId: string, updatedAt: string) =>
+    ({
+      deliveryId,
+      eventId: "evt_01J0A1B2C3D4E5F6G7H8J9K0MN",
+      correlationId: "cor_01J0A1B2C3D4E5F6G7H8J9K0MN",
+      tenantId: tenant,
+      partnerId: "ptr_01J0A1B2C3D4E5F6G7H8J9K0MN",
+      destinationId: "dst_01J0A1B2C3D4E5F6G7H8J9K0MN",
+      executionType: "ORIGINAL",
+      state: "succeeded",
+      attemptCount: 1,
+      maxAttempts: 5,
+      configSnapshot: {},
+      transformedPayload: {},
+      transformedPayloadHash: "hash",
+      partnerIdempotencyKey: "key",
+      createdAt: "2026-08-23T08:00:00.000Z",
+      updatedAt,
+      version: 3,
+      expiresAt: "2026-09-23T08:00:00.000Z",
+    }) as never;
+  const current = {
+    dlv_1: delivery("dlv_1", "2026-08-23T08:02:00.000Z"),
+    dlv_2: delivery("dlv_2", "2026-08-23T08:01:00.000Z"),
+  } as Record<string, Record<string, unknown>>;
+  const repository = new DynamoPersistence(
+    {
+      send: async (command: {
+        input?: {
+          Key?: { PK?: string; SK?: string };
+          KeyConditionExpression?: string;
+        };
+      }) => {
+        if (command.input?.KeyConditionExpression !== undefined)
+          return {
+            Items: [
+              { deliveryId: "dlv_1", updatedAt: "2026-08-23T08:02:00.000Z" },
+              { deliveryId: "dlv_1", updatedAt: "2026-08-23T08:00:00.000Z" },
+              { deliveryId: "dlv_2", updatedAt: "2026-08-23T08:01:00.000Z" },
+            ],
+          };
+        const keyValue = command.input?.Key?.SK ?? "";
+        if (command.input?.Key?.PK?.endsWith("#LOOKUP") === true)
+          return { Item: { eventId: "evt_1" } };
+        return { Item: current[keyValue.replace("DELIVERY#", "")] };
+      },
+    } as never,
+    {
+      coreTableName: "core",
+      auditTableName: "audit",
+      outboxShardCount: 8,
+    },
+  );
+
+  await expect(
+    repository.searchDeliveries({ tenantId: tenant } as never, {
+      limit: 10,
+      from: "2026-08-23T00:00:00.000Z",
+      to: "2026-08-24T00:00:00.000Z",
+    }),
+  ).resolves.toMatchObject({
+    items: [
+      { deliveryId: "dlv_1", updatedAt: "2026-08-23T08:02:00.000Z" },
+      { deliveryId: "dlv_2", updatedAt: "2026-08-23T08:01:00.000Z" },
+    ],
+  });
+});

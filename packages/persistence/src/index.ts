@@ -664,26 +664,38 @@ export class DynamoPersistence
       input,
     );
     const values = await Promise.all(
-      indexed.items.map((value) =>
-        this.getDelivery(
+      indexed.items.map(async (index) => ({
+        index,
+        delivery: await this.getDelivery(
           context,
-          value.deliveryId as DeliveryExecution["deliveryId"],
+          index.deliveryId as DeliveryExecution["deliveryId"],
         ),
-      ),
+      })),
     );
+    const returned = new Set<string>();
     return {
-      items: values.filter(
-        (value): value is DeliveryExecution =>
-          value !== undefined &&
-          (input.status === undefined || value.state === input.status) &&
-          (input.partnerId === undefined ||
-            value.partnerId === input.partnerId) &&
-          (input.destinationId === undefined ||
-            value.destinationId === input.destinationId) &&
-          (!input.terminalFailure ||
-            value.state === "dead_lettered" ||
-            value.state === "failed_terminal"),
-      ),
+      items: values.flatMap(({ index, delivery }) => {
+        // A delivery index represents the delivery version at the time it was
+        // written. Older local data can contain stale entries from transitions
+        // that predate index replacement. Never turn those historical pointers
+        // into duplicate current delivery rows.
+        if (
+          delivery === undefined ||
+          index.updatedAt !== delivery.updatedAt ||
+          returned.has(delivery.deliveryId) ||
+          (input.status !== undefined && delivery.state !== input.status) ||
+          (input.partnerId !== undefined &&
+            delivery.partnerId !== input.partnerId) ||
+          (input.destinationId !== undefined &&
+            delivery.destinationId !== input.destinationId) ||
+          (input.terminalFailure &&
+            delivery.state !== "dead_lettered" &&
+            delivery.state !== "failed_terminal")
+        )
+          return [];
+        returned.add(delivery.deliveryId);
+        return [delivery];
+      }),
       ...(indexed.cursor === undefined ? {} : { cursor: indexed.cursor }),
     };
   }
@@ -875,11 +887,24 @@ export class DynamoPersistence
           ExpressionAttributeValues: {
             ":pk": `TENANT#${context.tenantId}#DELIVERY_INDEX#STATUS#${state}`,
           },
-          Select: "COUNT",
           ExclusiveStartKey: cursor,
         }),
       );
-      count += result.Count ?? 0;
+      const values = await Promise.all(
+        (result.Items ?? []).map(async (index) => ({
+          index,
+          delivery: await this.getDelivery(
+            context,
+            index.deliveryId as DeliveryExecution["deliveryId"],
+          ),
+        })),
+      );
+      count += values.filter(
+        ({ index, delivery }) =>
+          delivery !== undefined &&
+          delivery.state === state &&
+          delivery.updatedAt === index.updatedAt,
+      ).length;
       cursor = result.LastEvaluatedKey as Record<string, unknown> | undefined;
     } while (cursor !== undefined);
     return count;
@@ -2233,39 +2258,83 @@ export class DynamoPersistence
   public async acquireLease(
     input: Parameters<DeliveryConcurrencyRepository["acquireLease"]>[0],
   ): Promise<DeliveryExecution | undefined> {
+    const current = await this.getCore<DeliveryExecution>(
+      key.delivery(input.context.tenantId, input.eventId, input.deliveryId),
+    );
+    if (current === undefined) return undefined;
+    const acquiredAt = new Date().toISOString() as never;
+    if (
+      current.version !== input.expectedVersion ||
+      !["scheduled", "retry_scheduled", "rate_limited"].includes(
+        current.state,
+      ) ||
+      (current.nextEligibleAt !== undefined &&
+        new Date(current.nextEligibleAt).getTime() >
+          new Date(acquiredAt).getTime())
+    )
+      return undefined;
+    const leased = transitionDelivery(current, {
+      to: "in_progress",
+      at: acquiredAt,
+      expectedVersion: input.expectedVersion,
+      lease: {
+        owner: input.owner,
+        token: input.token as never,
+        expiresAt: input.expiresAt as never,
+      },
+    });
     try {
-      const response = await this.client.send(
-        new UpdateCommand({
-          TableName: this.config.coreTableName,
-          Key: key.delivery(
-            input.context.tenantId,
-            input.eventId,
-            input.deliveryId,
-          ),
-          UpdateExpression:
-            "SET leaseOwner = :owner, leaseToken = :token, leaseAcquiredAt = :now, leaseExpiresAt = :expires, #state = :inProgress, #version = #version + :one",
-          ConditionExpression:
-            "#version = :expected AND ((#state = :scheduled OR #state = :retry OR #state = :rate) AND (attribute_not_exists(nextEligibleAt) OR nextEligibleAt <= :now))",
-          ExpressionAttributeNames: {
-            "#version": "version",
-            "#state": "state",
-          },
-          ExpressionAttributeValues: {
-            ":owner": input.owner,
-            ":token": input.token,
-            ":expires": input.expiresAt,
-            ":expected": input.expectedVersion,
-            ":now": new Date().toISOString(),
-            ":scheduled": "scheduled",
-            ":retry": "retry_scheduled",
-            ":rate": "rate_limited",
-            ":inProgress": "in_progress",
-            ":one": 1,
-          },
-          ReturnValues: "ALL_NEW",
+      await this.client.send(
+        new TransactWriteCommand({
+          TransactItems: [
+            {
+              Put: {
+                TableName: this.config.coreTableName,
+                Item: itemWithKeys(
+                  { ...leased, expiresAt: epochSeconds(leased.expiresAt) },
+                  key.delivery(
+                    input.context.tenantId,
+                    input.eventId,
+                    input.deliveryId,
+                  ),
+                  "DELIVERY",
+                ),
+                ConditionExpression:
+                  "#version = :expected AND ((#state = :scheduled OR #state = :retry OR #state = :rate) AND (attribute_not_exists(nextEligibleAt) OR nextEligibleAt <= :now))",
+                ExpressionAttributeNames: {
+                  "#version": "version",
+                  "#state": "state",
+                },
+                ExpressionAttributeValues: {
+                  ":expected": input.expectedVersion,
+                  ":now": acquiredAt,
+                  ":scheduled": "scheduled",
+                  ":retry": "retry_scheduled",
+                  ":rate": "rate_limited",
+                },
+              },
+            },
+            ...deliveryIndexCategories(current).map((category) => ({
+              Delete: {
+                TableName: this.config.coreTableName,
+                Key: key.deliveryIndex(
+                  current.tenantId,
+                  category,
+                  current.updatedAt,
+                  current.deliveryId,
+                ),
+              },
+            })),
+            ...deliveryIndexCategories(leased).map((category) => ({
+              Put: {
+                TableName: this.config.coreTableName,
+                Item: deliveryIndexItem(leased, category),
+              },
+            })),
+          ],
         }),
       );
-      return response.Attributes as DeliveryExecution | undefined;
+      return leased;
     } catch (error) {
       if (isConditionalFailure(error)) return undefined;
       throw error;
@@ -2710,6 +2779,14 @@ export class DynamoPersistence
   public async defer(
     input: Parameters<DeliveryConcurrencyRepository["defer"]>[0],
   ): Promise<boolean> {
+    const current = await this.getCore<DeliveryExecution>(
+      key.delivery(
+        input.context.tenantId,
+        input.eventId,
+        input.delivery.deliveryId,
+      ),
+    );
+    if (current === undefined) return false;
     const shard = stableShard(
       input.outbox.outboxId,
       this.config.outboxShardCount,
@@ -2762,6 +2839,17 @@ export class DynamoPersistence
                 ConditionExpression: "attribute_not_exists(PK)",
               },
             },
+            ...deliveryIndexCategories(current).map((category) => ({
+              Delete: {
+                TableName: this.config.coreTableName,
+                Key: key.deliveryIndex(
+                  current.tenantId,
+                  category,
+                  current.updatedAt,
+                  current.deliveryId,
+                ),
+              },
+            })),
             ...deliveryIndexCategories(input.delivery).map((category) => ({
               Put: {
                 TableName: this.config.coreTableName,

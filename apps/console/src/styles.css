@@ -67,6 +67,10 @@ a {
   background: #263656;
   color: #fff;
 }
+.sidebar nav a[aria-current="page"] {
+  background: #2a3e65;
+  color: #fff;
+}
 .session {
   margin-top: auto;
   display: grid;

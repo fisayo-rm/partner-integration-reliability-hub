@@ -70,6 +70,10 @@ test("M08 console login, role gate, API redaction, and tenant boundary", async (
 }) => {
   await signInWithOperator(page);
   await expect(page.getByText("operator", { exact: true })).toBeVisible();
+  await expect(page.getByRole("link", { name: "Overview" })).toHaveAttribute(
+    "aria-current",
+    "page",
+  );
 
   const [admin, viewer, otherTenant] = await Promise.all([
     token("admin@example.test", "admin-demo-only"),
@@ -143,6 +147,10 @@ test("M08 console login, role gate, API redaction, and tenant boundary", async (
   await expect(
     page.getByRole("heading", { name: "Partner configuration" }),
   ).toBeVisible();
+  await expect(page.getByRole("link", { name: "Partners" })).toHaveAttribute(
+    "aria-current",
+    "page",
+  );
   await page.locator(".content").evaluate((element) => {
     element.scrollTop = element.scrollHeight;
   });

@@ -10,6 +10,7 @@ import {
 import {
   Link,
   Navigate,
+  NavLink,
   Route,
   Routes,
   useNavigate,
@@ -488,9 +489,9 @@ function Shell({ children }: { readonly children: ReactNode }) {
         </Link>
         <nav aria-label="Operations navigation">
           {nav.map(([to, label]) => (
-            <Link key={to} to={to}>
+            <NavLink key={to} to={to}>
               {label}
-            </Link>
+            </NavLink>
           ))}
         </nav>
         <div className="session">
@@ -916,7 +917,7 @@ function DeliveryTable({
         <tr>
           <th>Delivery</th>
           <th>State</th>
-          <th>Failure</th>
+          <th>Last failure</th>
           <th>Attempts</th>
           <th>Updated</th>
         </tr>
@@ -1016,7 +1017,7 @@ function DeliveryDetailPage() {
                   value={detail.delivery.destinationId}
                 />
                 <Detail
-                  label="Failure"
+                  label="Last failure"
                   value={detail.delivery.lastFailureCategory ?? "—"}
                 />
                 <Detail

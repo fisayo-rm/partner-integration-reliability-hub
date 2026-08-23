@@ -81,12 +81,22 @@ The Keycloak users in `.env.example` are local-demo-only identities:
 - `other-tenant-viewer@example.test` / `other-viewer-demo-only` exists only to prove
   direct cross-tenant resource access is denied.
 
-For the primary operational story, run `pnpm local:up`, sign in as the operator,
-open Overview, search a delivery in Deliveries or Dead letters, review its redacted
-attempt/history evidence, and replay an eligible terminal delivery with a 10–1000
-character reason. The original delivery remains immutable. Use `pnpm demo:m06` in a
-separate terminal to produce a controlled dead-letter/replay story; its required
-environment values are supplied automatically by `pnpm local:verify`.
+The initial local seed intentionally contains configuration and identities, but no
+sample events or deliveries. To create a controlled operational story for the
+console, keep `pnpm local:up` running and use a separate terminal:
+
+```bash
+set -a
+source .env.local
+set +a
+pnpm demo:m06
+```
+
+Then sign in as the operator, open Overview, search the generated delivery in
+Deliveries or Dead letters, review its redacted attempt/history evidence, and replay
+an eligible terminal delivery with a 10–1000 character reason. The original delivery
+remains immutable. `pnpm local:verify` supplies its own isolated environment values
+when it runs the same demonstration.
 
 ## Repository boundaries
 

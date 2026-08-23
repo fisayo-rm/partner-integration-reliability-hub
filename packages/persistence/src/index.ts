@@ -77,6 +77,56 @@ export function isExpired(item: Item, now = new Date()): boolean {
 function item<T>(value: Item | undefined): T | undefined {
   return value === undefined || isExpired(value) ? undefined : (value as T);
 }
+const rollupCounters = [
+  "acceptedEvents",
+  "deliveryAttempts",
+  "deliverySuccesses",
+  "deliveryFailures",
+  "retriesScheduled",
+  "deadLetters",
+  "replaysRequested",
+  "replaySuccesses",
+  "replayFailures",
+  "latencyTotalMs",
+  "latencyCount",
+] as const;
+const latencyBuckets = [
+  "latencyLe100",
+  "latencyLe250",
+  "latencyLe500",
+  "latencyLe1000",
+  "latencyLe2500",
+  "latencyGt2500",
+] as const;
+function numeric(value: unknown): number {
+  return typeof value === "number" ? value : 0;
+}
+function operationalRollup(
+  value: Item,
+  input: {
+    readonly tenantId: TenantContext["tenantId"];
+    readonly hour: string;
+    readonly shard?: number;
+    readonly destinationId?: string;
+  },
+): OperationalRollup {
+  const counters = Object.fromEntries(
+    rollupCounters.map((name) => [name, numeric(value[name])]),
+  ) as Record<(typeof rollupCounters)[number], number>;
+  const buckets = Object.fromEntries(
+    latencyBuckets.map((name) => [name, numeric(value[name])]),
+  ) as Record<(typeof latencyBuckets)[number], number>;
+  return {
+    tenantId: input.tenantId,
+    hour: input.hour,
+    ...(input.shard === undefined ? {} : { shard: input.shard }),
+    ...(input.destinationId === undefined
+      ? {}
+      : { destinationId: input.destinationId as never }),
+    ...counters,
+    latencyBuckets: buckets,
+  };
+}
 function itemWithKeys(
   value: object,
   keys: { readonly PK: string; readonly SK: string },
@@ -92,6 +142,25 @@ function isConditionalFailure(error: unknown): boolean {
     (error.name === "ConditionalCheckFailedException" ||
       error.name === "TransactionCanceledException")
   );
+}
+async function mapWithConcurrency<Value, Result>(
+  values: readonly Value[],
+  maximum: number,
+  work: (value: Value) => Promise<Result>,
+): Promise<readonly Result[]> {
+  const results: Result[] = new Array(values.length);
+  let next = 0;
+  const worker = async () => {
+    while (next < values.length) {
+      const index = next;
+      next += 1;
+      results[index] = await work(values[index] as Value);
+    }
+  };
+  await Promise.all(
+    Array.from({ length: Math.min(maximum, values.length) }, worker),
+  );
+  return results;
 }
 function deliveryIndexItem(
   delivery: DeliveryExecution,
@@ -739,32 +808,52 @@ export class DynamoPersistence
       at = new Date(at.getTime() + 3_600_000)
     )
       hours.push(at);
-    const values = await Promise.all(
-      hours.flatMap((at) => {
-        const hour = at.toISOString().slice(0, 13).replace(/[-:T]/g, "");
-        return Array.from({ length: 8 }, (_, shard) =>
-          this.getCore<OperationalRollup>(
-            key.rollup(context.tenantId, hour, shard),
-          ),
-        );
-      }),
-    );
-    const destinations = await Promise.all(
-      hours.map(async (at) => {
-        const hour = at.toISOString().slice(0, 13).replace(/[-:T]/g, "");
-        const result = await this.client.send(
-          new QueryCommand({
-            TableName: this.config.coreTableName,
-            KeyConditionExpression: "PK = :pk AND begins_with(SK, :prefix)",
-            ExpressionAttributeValues: {
-              ":pk": `TENANT#${context.tenantId}#ROLLUP#HOUR#${hour}`,
-              ":prefix": "DESTINATION#",
-            },
-          }),
-        );
-        return (result.Items ?? []).filter((value) => !isExpired(value));
-      }),
-    );
+    const shards = hours.flatMap((at) => {
+      const hour = at.toISOString().slice(0, 13).replace(/[-:T]/g, "");
+      return Array.from({ length: 8 }, (_, shard) => ({
+        hour,
+        shard,
+        keys: key.rollup(context.tenantId, hour, shard),
+      }));
+    });
+    const values = await mapWithConcurrency(shards, 16, async (shard) => {
+      const value = await this.getCore<Item>(shard.keys);
+      return value === undefined
+        ? undefined
+        : operationalRollup(value, {
+            tenantId: context.tenantId,
+            hour: shard.hour,
+            shard: shard.shard,
+          });
+    });
+    const destinations = await mapWithConcurrency(hours, 16, async (at) => {
+      const hour = at.toISOString().slice(0, 13).replace(/[-:T]/g, "");
+      const result = await this.client.send(
+        new QueryCommand({
+          TableName: this.config.coreTableName,
+          KeyConditionExpression: "PK = :pk AND begins_with(SK, :prefix)",
+          ExpressionAttributeValues: {
+            ":pk": `TENANT#${context.tenantId}#ROLLUP#HOUR#${hour}`,
+            ":prefix": "DESTINATION#",
+          },
+        }),
+      );
+      return (result.Items ?? [])
+        .filter((value) => !isExpired(value))
+        .flatMap((value) => {
+          const keyValue = typeof value.SK === "string" ? value.SK : "";
+          const destinationId = keyValue.replace(/^DESTINATION#/, "");
+          return destinationId === ""
+            ? []
+            : [
+                operationalRollup(value, {
+                  tenantId: context.tenantId,
+                  hour,
+                  destinationId,
+                }),
+              ];
+        });
+    });
     return [
       ...values.filter(
         (value): value is OperationalRollup => value !== undefined,

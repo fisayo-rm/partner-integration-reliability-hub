@@ -1,5 +1,9 @@
 import { expect, test } from "vitest";
-import { key, stableShard } from "../../packages/persistence/src/index.js";
+import {
+  DynamoPersistence,
+  key,
+  stableShard,
+} from "../../packages/persistence/src/index.js";
 
 const tenant = "tenant_01J0A1B2C3D4E5F6G7H8J9K0MN" as never;
 const client = "cli_01J0A1B2C3D4E5F6G7H8J9K0MN" as never;
@@ -46,4 +50,79 @@ test("M02 key builders cover every core and audit access-pattern family", () => 
     "SECRET#partner#VERSION#v1",
   );
   expect(stableShard("obx_1", 8)).toBe(stableShard("obx_1", 8));
+});
+
+test("M08 bounds persistence reads for an exact 24-hour rollup range", async () => {
+  let active = 0;
+  let maximumActive = 0;
+  let calls = 0;
+  const repository = new DynamoPersistence(
+    {
+      send: async () => {
+        active += 1;
+        maximumActive = Math.max(maximumActive, active);
+        calls += 1;
+        await new Promise((resolve) => setTimeout(resolve, 1));
+        active -= 1;
+        return { Items: [] };
+      },
+    } as never,
+    {
+      coreTableName: "core",
+      auditTableName: "audit",
+      outboxShardCount: 8,
+    },
+  );
+
+  await expect(
+    repository.getRollups({ tenantId: tenant } as never, {
+      from: "2026-08-22T00:00:00.000Z",
+      to: "2026-08-23T00:00:00.000Z",
+    }),
+  ).resolves.toEqual([]);
+  expect(calls).toBe(225);
+  expect(maximumActive).toBeLessThanOrEqual(16);
+});
+
+test("M08 hydrates DynamoDB rollup counters into the operational read model", async () => {
+  const repository = new DynamoPersistence(
+    {
+      send: async (command: { input?: { Key?: unknown } }) =>
+        command.input?.Key === undefined
+          ? {
+              Items: [
+                {
+                  SK: "DESTINATION#dst_01J0A1B2C3D4E5F6G7H8J90010",
+                  deliveryFailures: 2,
+                  latencyGt2500: 2,
+                },
+              ],
+            }
+          : { Item: { deliverySuccesses: 3, latencyLe100: 3 } },
+    } as never,
+    {
+      coreTableName: "core",
+      auditTableName: "audit",
+      outboxShardCount: 8,
+    },
+  );
+
+  const rollups = await repository.getRollups({ tenantId: tenant } as never, {
+    from: "2026-08-23T08:00:00.000Z",
+    to: "2026-08-23T08:00:00.000Z",
+  });
+  expect(rollups[0]).toMatchObject({
+    tenantId: tenant,
+    hour: "2026082308",
+    shard: 0,
+    deliverySuccesses: 3,
+    latencyBuckets: { latencyLe100: 3, latencyGt2500: 0 },
+  });
+  expect(rollups.at(-1)).toMatchObject({
+    tenantId: tenant,
+    hour: "2026082308",
+    destinationId: "dst_01J0A1B2C3D4E5F6G7H8J90010",
+    deliveryFailures: 2,
+    latencyBuckets: { latencyLe100: 0, latencyGt2500: 2 },
+  });
 });

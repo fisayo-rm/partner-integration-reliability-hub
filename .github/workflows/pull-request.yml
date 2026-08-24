@@ -65,15 +65,12 @@ jobs:
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v5
-      - uses: aquasecurity/trivy-action@v0.33.1
+      - uses: aquasecurity/trivy-action@v0.36.0
         with:
-          {
-            scan-type: fs,
-            scan-ref: .,
-            severity: HIGH,
-            CRITICAL,
-            exit-code: "1",
-          }
+          scan-type: fs
+          scan-ref: .
+          severity: HIGH,CRITICAL
+          exit-code: "1"
   m11-hybrid-guard:
     name: M11 hybrid guard
     runs-on: ubuntu-24.04

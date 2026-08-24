@@ -15,6 +15,10 @@ const roots = [
 ];
 const ignoredDirectories = new Set([
   "dist",
+  // CDK synthesis produces bundled source maps. They are generated during CI
+  // and can contain harmless dependency fixture strings that match key
+  // delimiters, so scan the source rather than this disposable output.
+  "cdk.out",
   "node_modules",
   "coverage",
   ".git",

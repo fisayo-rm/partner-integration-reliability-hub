@@ -46,6 +46,16 @@ test("pull request workflow covers M10 engineering, Compose, container, and hybr
       (step: { name?: string }) => step.name,
     ),
   ).toContain("Integration tests and default/observability Compose profiles");
+  const trivy = value.jobs["container-scan"].steps.find(
+    (step: { uses?: string }) =>
+      step.uses === "aquasecurity/trivy-action@v0.36.0",
+  );
+  expect(trivy?.with).toMatchObject({
+    "scan-type": "fs",
+    "scan-ref": ".",
+    severity: "HIGH,CRITICAL",
+    "exit-code": "1",
+  });
   for (const job of ["engineering-gate", "compose-smoke"])
     expect(
       value.jobs[job].steps.findIndex(

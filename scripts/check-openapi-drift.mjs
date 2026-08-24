@@ -1,5 +1,6 @@
 import { readFile } from "node:fs/promises";
 import { spawnSync } from "node:child_process";
+import { URL } from "node:url";
 
 const build = spawnSync("pnpm", ["--filter", "@pirh/api", "build"], {
   stdio: "inherit",

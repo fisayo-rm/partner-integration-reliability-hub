@@ -98,11 +98,18 @@ class IdentityStack extends PirhStack {
       preventUserExistenceErrors: true,
       enableTokenRevocation: true,
     });
+    const hostedLoginDomain = this.userPool.addDomain("HostedLoginDomain", {
+      cognitoDomain: { domainPrefix: "pirh-demo-auth" },
+      managedLoginVersion: cognito.ManagedLoginVersion.NEWER_MANAGED_LOGIN,
+    });
     new CfnOutput(this, "CognitoIssuer", {
       value: this.userPool.userPoolProviderUrl,
     });
     new CfnOutput(this, "CognitoClientId", {
       value: this.userPoolClient.userPoolClientId,
+    });
+    new CfnOutput(this, "CognitoHostedLoginAuthority", {
+      value: `https://${hostedLoginDomain.domainName}`,
     });
     new CfnOutput(this, "CognitoUserPoolId", {
       value: this.userPool.userPoolId,

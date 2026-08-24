@@ -10,7 +10,7 @@ import { chromium } from "@playwright/test";
 const apiBase = process.env.HOSTED_API_URL;
 const consoleOrigin = process.env.HOSTED_CONSOLE_ORIGIN;
 const clientId = process.env.COGNITO_CLIENT_ID;
-const issuer = process.env.OIDC_ISSUER;
+const hostedLoginAuthority = process.env.VITE_OIDC_AUTHORITY;
 const adminPassword = process.env.DEMO_ADMIN_PASSWORD;
 const alphaUrl = process.env.HOSTED_MOCK_ALPHA_URL;
 const betaUrl = process.env.HOSTED_MOCK_BETA_URL;
@@ -18,13 +18,13 @@ if (
   apiBase === undefined ||
   consoleOrigin === undefined ||
   clientId === undefined ||
-  issuer === undefined ||
+  hostedLoginAuthority === undefined ||
   adminPassword === undefined ||
   alphaUrl === undefined ||
   betaUrl === undefined
 )
   throw new Error(
-    "Hosted API, console, Cognito, mock URLs, and DEMO_ADMIN_PASSWORD are required.",
+    "Hosted API, console, Cognito hosted-login authority, mock URLs, and DEMO_ADMIN_PASSWORD are required.",
   );
 const ready = await fetch(`${apiBase.replace(/\/$/, "")}/health/ready`, {
   signal: AbortSignal.timeout(10_000),
@@ -108,6 +108,14 @@ const tokenResult = await cognito.send(
 const accessToken = tokenResult.AuthenticationResult?.AccessToken;
 if (accessToken === undefined)
   throw new Error("Hosted Cognito authentication failed.");
+const hostedSession = await fetch(`${apiBase}/api/v1/session`, {
+  headers: { authorization: `Bearer ${accessToken}` },
+  signal: AbortSignal.timeout(10_000),
+});
+if (!hostedSession.ok)
+  throw new Error(
+    `Hosted console session authorization failed with ${hostedSession.status}.`,
+  );
 const until = Date.now() + 60_000;
 let detail;
 while (Date.now() < until) {
@@ -167,7 +175,7 @@ try {
         }),
       );
     },
-    { authority: issuer, audience: clientId, token: accessToken },
+    { authority: hostedLoginAuthority, audience: clientId, token: accessToken },
   );
   await page.goto(
     `${consoleOrigin.replace(/\/$/, "")}/events/${acceptance.eventId}`,
@@ -176,7 +184,19 @@ try {
       timeout: 20_000,
     },
   );
-  await page.getByRole("heading", { name: "Event detail" }).waitFor();
+  try {
+    await page.getByRole("heading", { name: "Event detail" }).waitFor();
+  } catch (error) {
+    const diagnostic = await page.evaluate(() => ({
+      url: globalThis.location.href,
+      storageKeys: Object.keys(globalThis.sessionStorage),
+      text: globalThis.document.body.innerText.slice(0, 500),
+    }));
+    throw new Error(
+      `Hosted console did not render the event detail: ${JSON.stringify(diagnostic)}`,
+      { cause: error },
+    );
+  }
   await page.getByText(acceptance.eventId, { exact: true }).waitFor();
   if ((await page.getByText("succeeded", { exact: true }).count()) < 2)
     throw new Error(

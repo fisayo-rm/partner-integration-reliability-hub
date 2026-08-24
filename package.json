@@ -44,6 +44,11 @@
     "verify": "pnpm format:check && pnpm lint && pnpm typecheck && pnpm test:typecheck && pnpm architecture && pnpm test && pnpm test:security && pnpm config:verify && pnpm build && pnpm secret:scan && pnpm audit"
   },
   "devDependencies": {
+    "@pirh/application": "workspace:*",
+    "@pirh/partner-http": "workspace:*",
+    "@pirh/persistence": "workspace:*",
+    "@pirh/secrets": "workspace:*",
+    "@pirh/transformation": "workspace:*",
     "@aws-sdk/client-dynamodb": "3.1111.0",
     "@aws-sdk/client-cognito-identity-provider": "3.1111.0",
     "@aws-sdk/client-ssm": "3.1111.0",

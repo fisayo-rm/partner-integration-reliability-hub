@@ -88,11 +88,11 @@ test("deployment uses protected OIDC and has a rollback entrypoint", async () =>
     "aws-actions/configure-aws-credentials@v5",
   );
   expect(JSON.stringify(deploy)).not.toContain("AWS_ACCESS_KEY_ID");
-  expect(JSON.stringify(deploy)).toContain(
-    "Hosted smoke and deployment metadata",
-  );
+  expect(JSON.stringify(deploy)).toContain("Hosted smoke");
   expect(JSON.stringify(deploy)).toContain("DEMO_ADMIN_PASSWORD");
   expect(JSON.stringify(deploy)).toContain("HOSTED_MOCK_ALPHA_URL");
+  expect(JSON.stringify(deploy)).toContain("OIDC_ISSUER");
+  expect(JSON.stringify(deploy)).toContain("pirh-demo-deployment-");
   expect(
     deploy.jobs.deploy.steps.find(
       (step: { name?: string }) => step.name === "Diff and deploy CDK stacks",
@@ -108,7 +108,10 @@ test("deployment uses protected OIDC and has a rollback entrypoint", async () =>
     ),
   );
   const rollback = await workflow("rollback-demo.yml");
-  expect(rollback.on.workflow_dispatch.inputs.lambda_version.required).toBe(
+  expect(rollback.on.workflow_dispatch.inputs.deployment_run_id.required).toBe(
     true,
   );
+  expect(rollback.permissions.actions).toBe("read");
+  expect(JSON.stringify(rollback)).toContain("gh run download");
+  expect(JSON.stringify(rollback)).toContain("CLOUDFLARE_API_TOKEN");
 });

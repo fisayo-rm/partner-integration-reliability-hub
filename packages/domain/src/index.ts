@@ -718,7 +718,10 @@ const permittedTransitions: Readonly<
     "failed_terminal",
     "dead_lettered",
   ],
-  retry_scheduled: ["scheduled"],
+  // A retry is dispatched by the same delivery worker after its deferred
+  // outbox message becomes eligible, so it must be able to acquire a new
+  // in-progress lease directly from retry_scheduled.
+  retry_scheduled: ["scheduled", "in_progress"],
   succeeded: [],
   failed_terminal: [],
   dead_lettered: [],

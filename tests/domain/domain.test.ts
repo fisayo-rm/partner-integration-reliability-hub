@@ -100,6 +100,25 @@ describe("delivery state transitions", () => {
     expect(succeeded.version).toBe(4);
     expect(isTerminalDeliveryState(succeeded.state)).toBe(true);
   });
+  test("allows a retry-scheduled delivery to acquire its second-attempt lease", () => {
+    const retryScheduled = {
+      ...delivery("retry_scheduled"),
+      attemptCount: 1,
+      nextEligibleAt: instant,
+    };
+    const resumed = transitionDelivery(retryScheduled, {
+      to: "in_progress",
+      at: instant,
+      expectedVersion: 1,
+      lease: {
+        owner: "worker-2",
+        token: id<"LeaseToken">("retry-lease"),
+        expiresAt: instant,
+      },
+    });
+    expect(resumed.state).toBe("in_progress");
+    expect(resumed.attemptCount).toBe(1);
+  });
   test("rejects invalid or unleased transitions", () => {
     expect(() =>
       transitionDelivery(delivery(), {

@@ -131,6 +131,7 @@ async function verify(profile) {
   }
 }
 try {
+  await pnpm(["build"]);
   await docker(["config", "--quiet"]);
   await verify();
   await docker(["down", "--timeout", "15", "--volumes", "--remove-orphans"]);

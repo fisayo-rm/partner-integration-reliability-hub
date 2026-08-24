@@ -103,6 +103,9 @@ class IdentityStack extends PirhStack {
     new CfnOutput(this, "CognitoClientId", {
       value: this.userPoolClient.userPoolClientId,
     });
+    new CfnOutput(this, "CognitoUserPoolId", {
+      value: this.userPool.userPoolId,
+    });
   }
 }
 
@@ -141,6 +144,8 @@ class DataStack extends PirhStack {
       removalPolicy: RemovalPolicy.RETAIN,
       pointInTimeRecoverySpecification: { pointInTimeRecoveryEnabled: true },
     });
+    new CfnOutput(this, "CoreTableName", { value: this.core.tableName });
+    new CfnOutput(this, "AuditTableName", { value: this.audit.tableName });
   }
 }
 

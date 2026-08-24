@@ -35,13 +35,35 @@ jobs:
           aws-region: us-east-1
       - name: Diff and deploy CDK stacks
         run: pnpm --filter @pirh/cdk exec cdk diff --strict && pnpm --filter @pirh/cdk exec cdk deploy --all --require-approval never
+      - name: Resolve deployed output values
+        run: |
+          stack_output() {
+            aws cloudformation describe-stacks --stack-name "$1" --query "Stacks[0].Outputs[?OutputKey=='$2'].OutputValue" --output text
+          }
+          {
+            echo "COGNITO_USER_POOL_ID=$(stack_output PirhDemoIdentity CognitoUserPoolId)"
+            echo "OIDC_ISSUER=$(stack_output PirhDemoIdentity CognitoIssuer)"
+            echo "VITE_OIDC_AUTHORITY=$(stack_output PirhDemoIdentity CognitoIssuer)"
+            echo "VITE_OIDC_CLIENT_ID=$(stack_output PirhDemoIdentity CognitoClientId)"
+            echo "CORE_TABLE_NAME=$(stack_output PirhDemoData CoreTableName)"
+            echo "HOSTED_API_URL=$(stack_output PirhDemoApi ApiUrl)"
+            echo "VITE_API_BASE_URL=$(stack_output PirhDemoApi ApiUrl)"
+            echo "HOSTED_CONSOLE_ORIGIN=https://${{ vars.CLOUDFLARE_PAGES_PROJECT }}.pages.dev"
+          } >> "$GITHUB_ENV"
       - name: Seed demo without exposing values
         env:
           DEMO_ADMIN_PASSWORD: ${{ secrets.DEMO_ADMIN_PASSWORD }}
           DEMO_OPERATOR_PASSWORD: ${{ secrets.DEMO_OPERATOR_PASSWORD }}
           DEMO_VIEWER_PASSWORD: ${{ secrets.DEMO_VIEWER_PASSWORD }}
+          COGNITO_USER_POOL_ID: ${{ env.COGNITO_USER_POOL_ID }}
+          CORE_TABLE_NAME: ${{ env.CORE_TABLE_NAME }}
+          OIDC_ISSUER: ${{ env.OIDC_ISSUER }}
         run: pnpm seed:demo
       - name: Build console from deployed outputs
+        env:
+          VITE_API_BASE_URL: ${{ env.VITE_API_BASE_URL }}
+          VITE_OIDC_AUTHORITY: ${{ env.VITE_OIDC_AUTHORITY }}
+          VITE_OIDC_CLIENT_ID: ${{ env.VITE_OIDC_CLIENT_ID }}
         run: pnpm --filter @pirh/console build
       - name: Deploy Cloudflare Pages static artifact
         env:
@@ -49,4 +71,7 @@ jobs:
           CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
         run: pnpm wrangler pages project create ${{ vars.CLOUDFLARE_PAGES_PROJECT }} --production-branch main || true; pnpm wrangler pages deploy apps/console/dist --project-name ${{ vars.CLOUDFLARE_PAGES_PROJECT }} --branch main
       - name: Hosted smoke and deployment metadata
+        env:
+          HOSTED_API_URL: ${{ env.HOSTED_API_URL }}
+          HOSTED_CONSOLE_ORIGIN: ${{ env.HOSTED_CONSOLE_ORIGIN }}
         run: pnpm smoke:hosted

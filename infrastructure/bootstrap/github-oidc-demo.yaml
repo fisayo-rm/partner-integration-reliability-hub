@@ -2,12 +2,15 @@ AWSTemplateFormatVersion: "2010-09-09"
 Description: GitHub OIDC bootstrap for the Partner Integration Reliability Hub demo
 
 Parameters:
-  GitHubRepository:
+  GitHubOidcSubjectPrefix:
     Type: String
-    Default: fisayo-rm/partner-integration-reliability-hub
+    Default: repo:fisayo-rm@16807062/partner-integration-reliability-hub@1333529909
+    Description: Immutable GitHub OIDC subject prefix for this repository
   GitHubEnvironment:
     Type: String
     Default: demo
+    AllowedValues:
+      - demo
 
 Resources:
   GitHubOidcProvider:
@@ -44,7 +47,7 @@ Resources:
             Condition:
               StringEquals:
                 token.actions.githubusercontent.com:aud: sts.amazonaws.com
-                token.actions.githubusercontent.com:sub: !Sub repo:${GitHubRepository}:environment:${GitHubEnvironment}
+                token.actions.githubusercontent.com:sub: !Sub ${GitHubOidcSubjectPrefix}:environment:${GitHubEnvironment}
       Policies:
         - PolicyName: PirhDemoDeployment
           PolicyDocument:

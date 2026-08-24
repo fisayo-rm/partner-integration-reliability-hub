@@ -56,6 +56,21 @@ importers:
       "@eslint/js":
         specifier: 9.35.0
         version: 9.35.0
+      "@pirh/application":
+        specifier: workspace:*
+        version: link:packages/application
+      "@pirh/partner-http":
+        specifier: workspace:*
+        version: link:packages/partner-http
+      "@pirh/persistence":
+        specifier: workspace:*
+        version: link:packages/persistence
+      "@pirh/secrets":
+        specifier: workspace:*
+        version: link:packages/secrets
+      "@pirh/transformation":
+        specifier: workspace:*
+        version: link:packages/transformation
       "@playwright/test":
         specifier: 1.55.1
         version: 1.55.1

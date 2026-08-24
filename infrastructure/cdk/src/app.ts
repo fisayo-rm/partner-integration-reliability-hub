@@ -23,6 +23,7 @@ import * as sqs from "aws-cdk-lib/aws-sqs";
 import { NodejsFunction } from "aws-cdk-lib/aws-lambda-nodejs";
 import { AwsSolutionsChecks } from "cdk-nag";
 import { join } from "node:path";
+import { lambdaHandler } from "./handler.js";
 
 const app = new App();
 const account = process.env.CDK_DEFAULT_ACCOUNT ?? process.env.AWS_ACCOUNT_ID;
@@ -209,14 +210,7 @@ function workerFunction(
   );
   const fn = new NodejsFunction(stack, id, {
     entry: source(entry),
-    handler:
-      id === "Api"
-        ? "httpApiHandler"
-        : id === "Reconciler"
-          ? "scheduledHandler"
-          : id === "Outbox"
-            ? "streamHandler"
-            : "sqsHandler",
+    handler: lambdaHandler(id),
     runtime: lambda.Runtime.NODEJS_24_X,
     architecture: lambda.Architecture.ARM_64,
     memorySize,

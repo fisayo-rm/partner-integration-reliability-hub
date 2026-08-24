@@ -21,10 +21,10 @@ jobs:
     environment: demo
     steps:
       - uses: actions/checkout@v5
-      - uses: actions/setup-node@v5
-        with: { node-version: 24, cache: pnpm }
       - uses: pnpm/action-setup@v4
         with: { version: 10.18.2 }
+      - uses: actions/setup-node@v5
+        with: { node-version: 24, cache: pnpm }
       - run: pnpm install --frozen-lockfile
       - name: Verify immutable source artifact
         run: pnpm verify && pnpm --filter @pirh/cdk synth

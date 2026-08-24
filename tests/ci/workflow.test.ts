@@ -47,6 +47,16 @@ test("pull request workflow covers M10 engineering, Compose, container, and hybr
       (step: { name?: string }) => step.name,
     ),
   ).toContain("Verify default and observability Compose profiles");
+  for (const job of ["engineering-gate", "compose-smoke"])
+    expect(
+      value.jobs[job].steps.findIndex(
+        (step: { uses?: string }) => step.uses === "pnpm/action-setup@v4",
+      ),
+    ).toBeLessThan(
+      value.jobs[job].steps.findIndex(
+        (step: { uses?: string }) => step.uses === "actions/setup-node@v5",
+      ),
+    );
 });
 
 test("deployment uses protected OIDC and has a rollback entrypoint", async () => {
@@ -57,6 +67,15 @@ test("deployment uses protected OIDC and has a rollback entrypoint", async () =>
     "aws-actions/configure-aws-credentials@v5",
   );
   expect(JSON.stringify(deploy)).not.toContain("AWS_ACCESS_KEY_ID");
+  expect(
+    deploy.jobs.deploy.steps.findIndex(
+      (step: { uses?: string }) => step.uses === "pnpm/action-setup@v4",
+    ),
+  ).toBeLessThan(
+    deploy.jobs.deploy.steps.findIndex(
+      (step: { uses?: string }) => step.uses === "actions/setup-node@v5",
+    ),
+  );
   const rollback = await workflow("rollback-demo.yml");
   expect(rollback.on.workflow_dispatch.inputs.lambda_version.required).toBe(
     true,

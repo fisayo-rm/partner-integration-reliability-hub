@@ -198,6 +198,10 @@ function workerFunction(
   concurrency: number,
   environment: Record<string, string>,
 ) {
+  const accountReservation = Number.parseInt(
+    process.env.PIRH_DEMO_RESERVED_CONCURRENCY ?? "0",
+    10,
+  );
   const fn = new NodejsFunction(stack, id, {
     entry: source(entry),
     handler:
@@ -212,7 +216,14 @@ function workerFunction(
     architecture: lambda.Architecture.ARM_64,
     memorySize,
     timeout,
-    reservedConcurrentExecutions: concurrency,
+    ...(accountReservation > 0
+      ? {
+          reservedConcurrentExecutions: Math.min(
+            concurrency,
+            accountReservation,
+          ),
+        }
+      : {}),
     tracing: lambda.Tracing.ACTIVE,
     logRetention: logs.RetentionDays.ONE_WEEK,
     environment: {

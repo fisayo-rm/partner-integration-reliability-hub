@@ -16,6 +16,7 @@ test("pull request workflow covers M10 engineering, Compose, container, and hybr
   expect(value.on.pull_request).toEqual({});
   expect(Object.keys(value.jobs)).toEqual([
     "engineering-gate",
+    "compose-profile",
     "compose-smoke",
     "container-scan",
     "m11-hybrid-guard",
@@ -41,11 +42,22 @@ test("pull request workflow covers M10 engineering, Compose, container, and hybr
       "Source and configuration secret scan",
     ]),
   );
+  expect(value.jobs["compose-profile"].strategy.matrix.profile).toEqual([
+    "default",
+    "observability",
+  ]);
   expect(
-    value.jobs["compose-smoke"].steps.map(
+    value.jobs["compose-profile"].steps.map(
       (step: { name?: string }) => step.name,
     ),
-  ).toContain("Integration tests and default/observability Compose profiles");
+  ).toEqual(
+    expect.arrayContaining([
+      "Build cached local worker image",
+      "Build cached local console image",
+      "Verify Compose profile",
+    ]),
+  );
+  expect(value.jobs["compose-smoke"].needs).toBe("compose-profile");
   const trivy = value.jobs["container-scan"].steps.find(
     (step: { uses?: string }) =>
       step.uses === "aquasecurity/trivy-action@v0.36.0",
@@ -56,7 +68,7 @@ test("pull request workflow covers M10 engineering, Compose, container, and hybr
     severity: "HIGH,CRITICAL",
     "exit-code": "1",
   });
-  for (const job of ["engineering-gate", "compose-smoke"])
+  for (const job of ["engineering-gate", "compose-profile"])
     expect(
       value.jobs[job].steps.findIndex(
         (step: { uses?: string }) => step.uses === "pnpm/action-setup@v4",
@@ -76,6 +88,11 @@ test("deployment uses protected OIDC and has a rollback entrypoint", async () =>
     "aws-actions/configure-aws-credentials@v5",
   );
   expect(JSON.stringify(deploy)).not.toContain("AWS_ACCESS_KEY_ID");
+  expect(
+    deploy.jobs.deploy.steps.find(
+      (step: { name?: string }) => step.name === "Diff and deploy CDK stacks",
+    ).run,
+  ).toContain("pnpm --filter @pirh/cdk run diff");
   expect(
     deploy.jobs.deploy.steps.findIndex(
       (step: { uses?: string }) => step.uses === "pnpm/action-setup@v4",

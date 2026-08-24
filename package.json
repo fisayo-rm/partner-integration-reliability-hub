@@ -27,6 +27,8 @@
     "local:up:observability": "docker compose --env-file .env.local --profile observability up --build",
     "local:down": "docker compose --profile observability down --volumes --remove-orphans",
     "local:verify": "node scripts/verify-local-platform.mjs",
+    "local:verify:default": "node scripts/verify-local-platform.mjs default",
+    "local:verify:observability": "node scripts/verify-local-platform.mjs observability",
     "demo:m04": "node scripts/demo-m04.mjs",
     "demo:m05": "node scripts/demo-m05.mjs",
     "demo:m06": "node scripts/demo-m06.mjs",

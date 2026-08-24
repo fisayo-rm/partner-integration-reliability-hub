@@ -2,6 +2,16 @@ import { spawn } from "node:child_process";
 import { randomBytes } from "node:crypto";
 
 const project = `pirh-m02-${Date.now()}`;
+const requestedProfile = process.argv[2];
+if (
+  requestedProfile !== undefined &&
+  requestedProfile !== "default" &&
+  requestedProfile !== "observability"
+)
+  throw new Error(
+    "Expected no profile, default, or observability for local platform verification.",
+  );
+const skipComposeBuild = process.env.PIRH_COMPOSE_SKIP_BUILD === "1";
 const composeEnvironment = {
   ...process.env,
   LOCAL_SECRET_MASTER_KEY_B64: randomBytes(32).toString("base64"),
@@ -88,9 +98,10 @@ async function verify(profile) {
   if (profile === "observability")
     composeEnvironment.PIRH_OTLP_ENDPOINT = "http://otel-collector:4318";
   else delete composeEnvironment.PIRH_OTLP_ENDPOINT;
+  const build = skipComposeBuild ? [] : ["--build"];
   const args = profile
-    ? ["--profile", profile, "up", "--build", "--detach", "--wait"]
-    : ["up", "--build", "--detach", "--wait"];
+    ? ["--profile", profile, "up", ...build, "--detach", "--wait"]
+    : ["up", ...build, "--detach", "--wait"];
   await docker(args);
   for (const [url, label] of [
     ["http://localhost:3000/health/ready", "API readiness"],
@@ -133,12 +144,22 @@ async function verify(profile) {
 try {
   await pnpm(["build"]);
   await docker(["config", "--quiet"]);
-  await verify();
-  await docker(["down", "--timeout", "15", "--volumes", "--remove-orphans"]);
-  await verify("observability");
-  console.log(
-    "Local platform verification passed for default and observability profiles.",
-  );
+  if (requestedProfile === "default") {
+    await verify();
+    console.log("Local platform verification passed for the default profile.");
+  } else if (requestedProfile === "observability") {
+    await verify("observability");
+    console.log(
+      "Local platform verification passed for the observability profile.",
+    );
+  } else {
+    await verify();
+    await docker(["down", "--timeout", "15", "--volumes", "--remove-orphans"]);
+    await verify("observability");
+    console.log(
+      "Local platform verification passed for default and observability profiles.",
+    );
+  }
 } finally {
   await docker([
     "down",

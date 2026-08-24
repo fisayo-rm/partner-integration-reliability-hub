@@ -34,7 +34,7 @@ jobs:
           role-to-assume: ${{ vars.AWS_DEPLOY_ROLE_ARN }}
           aws-region: us-east-1
       - name: Diff and deploy CDK stacks
-        run: pnpm --filter @pirh/cdk exec cdk diff --strict && pnpm --filter @pirh/cdk exec cdk deploy --all --require-approval never
+        run: pnpm --filter @pirh/cdk run diff && pnpm --filter @pirh/cdk run deploy
       - name: Resolve deployed output values
         run: |
           stack_output() {

@@ -88,6 +88,11 @@ test("deployment uses protected OIDC and has a rollback entrypoint", async () =>
     "aws-actions/configure-aws-credentials@v5",
   );
   expect(JSON.stringify(deploy)).not.toContain("AWS_ACCESS_KEY_ID");
+  expect(JSON.stringify(deploy)).toContain(
+    "Hosted smoke and deployment metadata",
+  );
+  expect(JSON.stringify(deploy)).toContain("DEMO_ADMIN_PASSWORD");
+  expect(JSON.stringify(deploy)).toContain("HOSTED_MOCK_ALPHA_URL");
   expect(
     deploy.jobs.deploy.steps.find(
       (step: { name?: string }) => step.name === "Diff and deploy CDK stacks",

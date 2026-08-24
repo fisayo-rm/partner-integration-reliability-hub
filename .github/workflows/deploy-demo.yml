@@ -45,9 +45,13 @@ jobs:
             echo "OIDC_ISSUER=$(stack_output PirhDemoIdentity CognitoIssuer)"
             echo "VITE_OIDC_AUTHORITY=$(stack_output PirhDemoIdentity CognitoIssuer)"
             echo "VITE_OIDC_CLIENT_ID=$(stack_output PirhDemoIdentity CognitoClientId)"
+            echo "COGNITO_CLIENT_ID=$(stack_output PirhDemoIdentity CognitoClientId)"
             echo "CORE_TABLE_NAME=$(stack_output PirhDemoData CoreTableName)"
+            echo "AUDIT_TABLE_NAME=$(stack_output PirhDemoData AuditTableName)"
             echo "HOSTED_API_URL=$(stack_output PirhDemoApi ApiUrl)"
             echo "VITE_API_BASE_URL=$(stack_output PirhDemoApi ApiUrl)"
+            echo "HOSTED_MOCK_ALPHA_URL=$(stack_output PirhDemoMockPartners MockAlphaUrl)"
+            echo "HOSTED_MOCK_BETA_URL=$(stack_output PirhDemoMockPartners MockBetaUrl)"
             echo "HOSTED_CONSOLE_ORIGIN=https://${{ vars.CLOUDFLARE_PAGES_PROJECT }}.pages.dev"
           } >> "$GITHUB_ENV"
       - name: Seed demo without exposing values
@@ -57,7 +61,10 @@ jobs:
           DEMO_VIEWER_PASSWORD: ${{ secrets.DEMO_VIEWER_PASSWORD }}
           COGNITO_USER_POOL_ID: ${{ env.COGNITO_USER_POOL_ID }}
           CORE_TABLE_NAME: ${{ env.CORE_TABLE_NAME }}
+          AUDIT_TABLE_NAME: ${{ env.AUDIT_TABLE_NAME }}
           OIDC_ISSUER: ${{ env.OIDC_ISSUER }}
+          HOSTED_MOCK_ALPHA_URL: ${{ env.HOSTED_MOCK_ALPHA_URL }}
+          HOSTED_MOCK_BETA_URL: ${{ env.HOSTED_MOCK_BETA_URL }}
         run: pnpm seed:demo
       - name: Build console from deployed outputs
         env:
@@ -74,4 +81,8 @@ jobs:
         env:
           HOSTED_API_URL: ${{ env.HOSTED_API_URL }}
           HOSTED_CONSOLE_ORIGIN: ${{ env.HOSTED_CONSOLE_ORIGIN }}
+          COGNITO_CLIENT_ID: ${{ env.COGNITO_CLIENT_ID }}
+          HOSTED_MOCK_ALPHA_URL: ${{ env.HOSTED_MOCK_ALPHA_URL }}
+          HOSTED_MOCK_BETA_URL: ${{ env.HOSTED_MOCK_BETA_URL }}
+          DEMO_ADMIN_PASSWORD: ${{ secrets.DEMO_ADMIN_PASSWORD }}
         run: pnpm smoke:hosted

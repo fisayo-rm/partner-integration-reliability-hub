@@ -5,10 +5,12 @@ import {
   CognitoIdentityProviderClient,
 } from "@aws-sdk/client-cognito-identity-provider";
 import { GetParameterCommand, SSMClient } from "@aws-sdk/client-ssm";
+import { chromium } from "@playwright/test";
 
 const apiBase = process.env.HOSTED_API_URL;
 const consoleOrigin = process.env.HOSTED_CONSOLE_ORIGIN;
 const clientId = process.env.COGNITO_CLIENT_ID;
+const issuer = process.env.OIDC_ISSUER;
 const adminPassword = process.env.DEMO_ADMIN_PASSWORD;
 const alphaUrl = process.env.HOSTED_MOCK_ALPHA_URL;
 const betaUrl = process.env.HOSTED_MOCK_BETA_URL;
@@ -16,6 +18,7 @@ if (
   apiBase === undefined ||
   consoleOrigin === undefined ||
   clientId === undefined ||
+  issuer === undefined ||
   adminPassword === undefined ||
   alphaUrl === undefined ||
   betaUrl === undefined
@@ -149,13 +152,46 @@ const containsEvent = (value) =>
   JSON.stringify(value).includes(acceptance.eventId);
 if (!containsEvent(alpha) || !containsEvent(beta))
   throw new Error("Hosted mock capture evidence is incomplete.");
+const browser = await chromium.launch({ headless: true });
+try {
+  const page = await browser.newPage();
+  await page.addInitScript(
+    ({ authority, audience, token }) => {
+      globalThis.sessionStorage.setItem(
+        `oidc.user:${authority}:${audience}`,
+        JSON.stringify({
+          access_token: token,
+          token_type: "Bearer",
+          profile: { sub: "hosted-smoke", "cognito:groups": ["admin"] },
+          expires_at: Math.floor(Date.now() / 1_000) + 300,
+        }),
+      );
+    },
+    { authority: issuer, audience: clientId, token: accessToken },
+  );
+  await page.goto(
+    `${consoleOrigin.replace(/\/$/, "")}/events/${acceptance.eventId}`,
+    {
+      waitUntil: "networkidle",
+      timeout: 20_000,
+    },
+  );
+  await page.getByRole("heading", { name: "Event detail" }).waitFor();
+  await page.getByText(acceptance.eventId, { exact: true }).waitFor();
+  if ((await page.getByText("succeeded", { exact: true }).count()) < 2)
+    throw new Error(
+      "Hosted console did not display both successful deliveries.",
+    );
+} finally {
+  await browser.close();
+}
 console.log(
   JSON.stringify({
     api: "ready",
-    console: "reachable",
+    consoleReachability: "reachable",
     eventId: acceptance.eventId,
     deliveries: detail.deliveries.length,
     mocks: "captured",
-    consoleSession: "authenticated",
+    console: "authenticated-event-visible",
   }),
 );

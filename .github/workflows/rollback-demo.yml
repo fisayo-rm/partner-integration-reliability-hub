@@ -3,14 +3,12 @@ name: Roll back demo
 on:
   workflow_dispatch:
     inputs:
-      lambda_version:
-        description: Previously recorded Lambda version
-        required: true
-      console_artifact:
-        description: Previously recorded immutable Pages artifact
+      deployment_run_id:
+        description: Successful Deploy demo run ID whose immutable artifact should be restored
         required: true
 
 permissions:
+  actions: read
   contents: read
   id-token: write
 
@@ -20,9 +18,22 @@ jobs:
     environment: demo
     steps:
       - uses: actions/checkout@v5
+      - uses: pnpm/action-setup@v4
+        with: { version: 10.18.2 }
+      - uses: actions/setup-node@v5
+        with: { node-version: 24, cache: pnpm }
+      - run: pnpm install --frozen-lockfile
       - uses: aws-actions/configure-aws-credentials@v5
         with:
           role-to-assume: ${{ vars.AWS_DEPLOY_ROLE_ARN }}
           aws-region: us-east-1
+      - name: Download the selected immutable deployment artifact
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh run download ${{ inputs.deployment_run_id }} --name pirh-demo-deployment-${{ inputs.deployment_run_id }} --dir .rollback-artifact
       - name: Restore aliases and prior console artifact without data rollback
-        run: ./scripts/rollback-demo.sh ${{ inputs.lambda_version }} ${{ inputs.console_artifact }}
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          CLOUDFLARE_PAGES_PROJECT: ${{ vars.CLOUDFLARE_PAGES_PROJECT }}
+        run: node scripts/rollback-demo.mjs .rollback-artifact/deployment.json .rollback-artifact/console

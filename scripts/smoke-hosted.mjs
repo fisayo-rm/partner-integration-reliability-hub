@@ -55,7 +55,7 @@ const body = Buffer.from(
   JSON.stringify({
     eventType: "shipment.status_changed",
     occurredAt: new Date().toISOString(),
-    subject: { id: `hosted-smoke-${randomUUID()}` },
+    subject: { type: "shipment", id: `hosted-smoke-${randomUUID()}` },
     data: {
       trackingNumber: "PIRH-HOSTED-SMOKE",
       status: "in_transit",

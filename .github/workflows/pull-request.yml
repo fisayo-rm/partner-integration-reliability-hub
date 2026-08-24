@@ -30,8 +30,6 @@ jobs:
         run: pnpm architecture
       - name: Unit tests
         run: pnpm test
-      - name: Integration tests
-        run: pnpm test:integration
       - name: Contract tests
         run: pnpm test -- tests/contracts
       - name: Security test gate
@@ -60,22 +58,19 @@ jobs:
       - run: pnpm install --frozen-lockfile
       - name: Install Playwright Chromium
         run: pnpm exec playwright install --with-deps chromium
-      - name: Verify default and observability Compose profiles
+      - name: Integration tests and default/observability Compose profiles
         run: pnpm local:verify
   container-scan:
     name: Container scan
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v5
-      - uses: aquasecurity/trivy-action@0.33.1
+      - uses: aquasecurity/trivy-action@v0.36.0
         with:
-          {
-            scan-type: fs,
-            scan-ref: .,
-            severity: HIGH,
-            CRITICAL,
-            exit-code: "1",
-          }
+          scan-type: fs
+          scan-ref: .
+          severity: HIGH,CRITICAL
+          exit-code: "1"
   m11-hybrid-guard:
     name: M11 hybrid guard
     runs-on: ubuntu-24.04

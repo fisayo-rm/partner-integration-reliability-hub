@@ -2,18 +2,27 @@ import { readFile } from "node:fs/promises";
 import { expect, test } from "vitest";
 import { parse } from "yaml";
 
-test("pull-request workflow runs Stage A and the local platform/integration smoke", async () => {
-  const workflow = parse(
+async function workflow(name: string) {
+  return parse(
     await readFile(
-      new URL("../../.github/workflows/pull-request.yml", import.meta.url),
+      new URL(`../../.github/workflows/${name}`, import.meta.url),
       "utf8",
     ),
   );
-  const jobs = workflow.jobs;
-  expect(workflow.on.pull_request).toEqual({});
-  expect(Object.keys(jobs)).toEqual(["stage-a", "local-platform"]);
-  const steps = jobs["stage-a"].steps;
-  const names = steps.map((step: { name?: string }) => step.name);
+}
+
+test("pull request workflow covers M10 engineering, Compose, container, and hybrid gates", async () => {
+  const value = await workflow("pull-request.yml");
+  expect(value.on.pull_request).toEqual({});
+  expect(Object.keys(value.jobs)).toEqual([
+    "engineering-gate",
+    "compose-smoke",
+    "container-scan",
+    "m11-hybrid-guard",
+  ]);
+  const names = value.jobs["engineering-gate"].steps.map(
+    (step: { name?: string }) => step.name,
+  );
   expect(names).toEqual(
     expect.arrayContaining([
       "Install with frozen lockfile",
@@ -23,30 +32,33 @@ test("pull-request workflow runs Stage A and the local platform/integration smok
       "Test TypeScript compile",
       "Architecture dependency test",
       "Unit tests",
-      "Configuration bundle schema and exclusion scan",
+      "Integration tests",
+      "Contract tests",
       "Security test gate",
-      "Build all workspaces",
       "Explicit console production build",
+      "Lambda and CDK bundle build",
+      "OpenAPI drift",
       "High-severity dependency audit",
       "Source and configuration secret scan",
     ]),
   );
-  const commands = steps
-    .map((step: { run?: string }) => step.run)
-    .filter(Boolean);
-  expect(commands).toEqual(
-    expect.arrayContaining([
-      "pnpm format:check",
-      "pnpm test:typecheck",
-      "pnpm test",
-      "pnpm test:security",
-      "pnpm build",
-    ]),
+  expect(
+    value.jobs["compose-smoke"].steps.map(
+      (step: { name?: string }) => step.name,
+    ),
+  ).toContain("Verify default and observability Compose profiles");
+});
+
+test("deployment uses protected OIDC and has a rollback entrypoint", async () => {
+  const deploy = await workflow("deploy-demo.yml");
+  expect(deploy.permissions["id-token"]).toBe("write");
+  expect(deploy.jobs.deploy.environment).toBe("demo");
+  expect(JSON.stringify(deploy)).toContain(
+    "aws-actions/configure-aws-credentials@v5",
   );
-  expect(
-    jobs["local-platform"].steps.map((step: { name?: string }) => step.name),
-  ).toContain("Verify Compose topology");
-  expect(
-    jobs["local-platform"].steps.map((step: { name?: string }) => step.name),
-  ).toContain("Install Playwright Chromium");
+  expect(JSON.stringify(deploy)).not.toContain("AWS_ACCESS_KEY_ID");
+  const rollback = await workflow("rollback-demo.yml");
+  expect(rollback.on.workflow_dispatch.inputs.lambda_version.required).toBe(
+    true,
+  );
 });

@@ -1,5 +1,9 @@
 import { DynamoDBClient } from "@aws-sdk/client-dynamodb";
 import { DynamoDBDocumentClient } from "@aws-sdk/lib-dynamodb";
+import {
+  CreateScheduleCommand,
+  SchedulerClient,
+} from "@aws-sdk/client-scheduler";
 import { DynamoPersistence } from "@pirh/persistence";
 import {
   createTelemetryRuntime,
@@ -12,19 +16,27 @@ import {
 } from "@pirh/queue";
 
 const region = process.env.AWS_REGION ?? "us-east-1";
+const local = (process.env.APP_ENV ?? "local") === "local";
 const runtime = createTelemetryRuntime({
   service: "outbox-reconciler",
   environment: process.env.APP_ENV ?? "local",
   otlpEndpoint: process.env.PIRH_OTLP_ENDPOINT,
   logLevel: process.env.LOG_LEVEL,
 });
-const credentials = { accessKeyId: "local", secretAccessKey: "local" };
+const awsConfig = local
+  ? { credentials: { accessKeyId: "local", secretAccessKey: "local" } }
+  : {};
 const persistence = new DynamoPersistence(
   DynamoDBDocumentClient.from(
     new DynamoDBClient({
       region,
-      endpoint: process.env.DYNAMODB_ENDPOINT ?? "http://dynamodb-local:8000",
-      credentials,
+      ...awsConfig,
+      ...(local
+        ? {
+            endpoint:
+              process.env.DYNAMODB_ENDPOINT ?? "http://dynamodb-local:8000",
+          }
+        : {}),
     }),
   ),
   {
@@ -35,8 +47,10 @@ const persistence = new DynamoPersistence(
 );
 const sqs = createSqsClient({
   region,
-  endpoint: process.env.ELASTICMQ_ENDPOINT ?? "http://elasticmq:9324",
-  credentials,
+  ...awsConfig,
+  ...(local
+    ? { endpoint: process.env.ELASTICMQ_ENDPOINT ?? "http://elasticmq:9324" }
+    : {}),
 });
 const routing = new ElasticMqQueue(
   sqs,
@@ -53,7 +67,41 @@ for (const signal of ["SIGINT", "SIGTERM"] as const)
   process.on(signal, () => {
     stopping = true;
   });
-async function tick() {
+const scheduler = local ? undefined : new SchedulerClient({ region });
+async function scheduleLongDelay(
+  message: NonNullable<ReturnType<typeof outboxQueueMessage>>,
+) {
+  const deliveryId = "deliveryId" in message ? message.deliveryId : undefined;
+  const targetArn = process.env.DELIVERY_QUEUE_ARN;
+  const targetRoleArn = process.env.SCHEDULER_EXECUTION_ROLE_ARN;
+  if (
+    scheduler === undefined ||
+    deliveryId === undefined ||
+    targetArn === undefined ||
+    targetRoleArn === undefined
+  )
+    throw new Error("Scheduler target configuration is unavailable.");
+  const at = new Date(String(message.notBefore));
+  const attempt =
+    Number(
+      (message as unknown as { attemptNumber?: number }).attemptNumber ?? 0,
+    ) + 1;
+  await scheduler.send(
+    new CreateScheduleCommand({
+      Name: `pirh-demo-${deliveryId}-${attempt}`.slice(0, 64),
+      ScheduleExpression: `at(${at.toISOString().replace(/\.\d{3}Z$/, "")})`,
+      FlexibleTimeWindow: { Mode: "OFF" },
+      ActionAfterCompletion: "DELETE",
+      ClientToken: `pirh-${deliveryId}-${attempt}`.slice(0, 64),
+      Target: {
+        Arn: targetArn,
+        RoleArn: targetRoleArn,
+        Input: JSON.stringify(message),
+      },
+    }),
+  );
+}
+export async function tick() {
   for (
     let shard = 0;
     shard < Number(process.env.OUTBOX_SHARD_COUNT ?? 8);
@@ -71,13 +119,15 @@ async function tick() {
           { kind: record.kind },
           async () => {
             if (record.kind === "SCHEDULE_DELIVERY") {
-              const notBefore = new Date(String(record.payload.notBefore));
-              if (notBefore.getTime() - Date.now() > 900_000) {
-                await persistence.materializeScheduledWork(record);
-                return;
-              }
               const message = outboxQueueMessage(record);
               if (message === undefined) return;
+              const notBefore = new Date(String(record.payload.notBefore));
+              if (notBefore.getTime() - Date.now() > 900_000) {
+                if (local) await persistence.materializeScheduledWork(record);
+                else await scheduleLongDelay(message);
+                await persistence.markPublished(record, new Date());
+                return;
+              }
               await delivery.publish({
                 body: message as never,
                 delaySeconds: Math.max(
@@ -142,9 +192,12 @@ async function tick() {
       await persistence.markScheduledWorkPublished(work, new Date());
     }
 }
-while (!stopping) {
-  await tick();
-  await new Promise((resolve) => setTimeout(resolve, intervalMs));
+export async function runLocal(): Promise<void> {
+  while (!stopping) {
+    await tick();
+    await new Promise((resolve) => setTimeout(resolve, intervalMs));
+  }
+  await runtime.shutdown();
 }
-await runtime.shutdown();
+if (process.argv[1]?.endsWith("index.js")) void runLocal();
 export {};

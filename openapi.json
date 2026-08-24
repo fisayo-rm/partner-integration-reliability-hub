@@ -1,0 +1,65 @@
+{
+  "openapi": "3.1.0",
+  "info": {
+    "title": "Partner Integration Reliability Hub API",
+    "version": "0.1.0"
+  },
+  "components": { "schemas": {} },
+  "paths": {
+    "/health/live": {
+      "get": {
+        "responses": {
+          "200": {
+            "description": "Default Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "required": ["status"],
+                  "properties": { "status": { "type": "string" } }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/health/ready": {
+      "get": { "responses": { "200": { "description": "Default Response" } } }
+    },
+    "/meta": {
+      "get": {
+        "responses": {
+          "200": {
+            "description": "Default Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "required": [
+                    "service",
+                    "apiVersion",
+                    "contractVersion",
+                    "mode"
+                  ],
+                  "properties": {
+                    "service": {
+                      "enum": ["partner-integration-reliability-hub"]
+                    },
+                    "apiVersion": { "enum": ["v1"] },
+                    "contractVersion": { "enum": [1] },
+                    "mode": { "enum": ["skeleton"] }
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/openapi.json": {
+      "get": { "responses": { "200": { "description": "Default Response" } } }
+    }
+  },
+  "servers": [{ "url": "/api/v1" }]
+}

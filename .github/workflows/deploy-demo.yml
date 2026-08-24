@@ -1,0 +1,52 @@
+name: Deploy demo
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+  id-token: write
+  actions: read
+
+concurrency:
+  group: pirh-demo-deploy
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    name: Deploy us-east-1 demo
+    runs-on: ubuntu-24.04
+    environment: demo
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v5
+        with: { node-version: 24, cache: pnpm }
+      - uses: pnpm/action-setup@v4
+        with: { version: 10.18.2 }
+      - run: pnpm install --frozen-lockfile
+      - name: Verify immutable source artifact
+        run: pnpm verify && pnpm --filter @pirh/cdk synth
+      - name: Configure AWS credentials through GitHub OIDC
+        uses: aws-actions/configure-aws-credentials@v5
+        with:
+          role-to-assume: ${{ vars.AWS_DEPLOY_ROLE_ARN }}
+          aws-region: us-east-1
+      - name: Diff and deploy CDK stacks
+        run: pnpm --filter @pirh/cdk exec cdk diff --strict && pnpm --filter @pirh/cdk exec cdk deploy --all --require-approval never
+      - name: Seed demo without exposing values
+        env:
+          DEMO_ADMIN_PASSWORD: ${{ secrets.DEMO_ADMIN_PASSWORD }}
+          DEMO_OPERATOR_PASSWORD: ${{ secrets.DEMO_OPERATOR_PASSWORD }}
+          DEMO_VIEWER_PASSWORD: ${{ secrets.DEMO_VIEWER_PASSWORD }}
+        run: pnpm seed:demo
+      - name: Build console from deployed outputs
+        run: pnpm --filter @pirh/console build
+      - name: Deploy Cloudflare Pages static artifact
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+        run: pnpm wrangler pages project create ${{ vars.CLOUDFLARE_PAGES_PROJECT }} --production-branch main || true; pnpm wrangler pages deploy apps/console/dist --project-name ${{ vars.CLOUDFLARE_PAGES_PROJECT }} --branch main
+      - name: Hosted smoke and deployment metadata
+        run: pnpm smoke:hosted

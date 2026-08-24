@@ -1,0 +1,28 @@
+name: Roll back demo
+
+on:
+  workflow_dispatch:
+    inputs:
+      lambda_version:
+        description: Previously recorded Lambda version
+        required: true
+      console_artifact:
+        description: Previously recorded immutable Pages artifact
+        required: true
+
+permissions:
+  contents: read
+  id-token: write
+
+jobs:
+  rollback:
+    runs-on: ubuntu-24.04
+    environment: demo
+    steps:
+      - uses: actions/checkout@v5
+      - uses: aws-actions/configure-aws-credentials@v5
+        with:
+          role-to-assume: ${{ vars.AWS_DEPLOY_ROLE_ARN }}
+          aws-region: us-east-1
+      - name: Restore aliases and prior console artifact without data rollback
+        run: ./scripts/rollback-demo.sh ${{ inputs.lambda_version }} ${{ inputs.console_artifact }}

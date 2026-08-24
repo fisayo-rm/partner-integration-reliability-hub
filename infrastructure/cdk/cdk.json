@@ -1,0 +1,7 @@
+{
+  "app": "pnpm exec tsx src/app.ts",
+  "context": {
+    "@aws-cdk/core:checkSecretUsage": true,
+    "@aws-cdk/core:defaultCrossStackReferences": "strong"
+  }
+}

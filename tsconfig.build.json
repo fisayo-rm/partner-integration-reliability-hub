@@ -23,6 +23,7 @@
     { "path": "./apps/outbox-reconciler" },
     { "path": "./apps/mock-partner-alpha" },
     { "path": "./apps/mock-partner-beta" },
-    { "path": "./apps/config-cli" }
+    { "path": "./apps/config-cli" },
+    { "path": "./infrastructure/cdk" }
   ]
 }

@@ -7,21 +7,15 @@ permissions:
   contents: read
 
 jobs:
-  stage-a:
-    name: Stage A engineering baseline
+  engineering-gate:
+    name: Engineering gate
     runs-on: ubuntu-24.04
     steps:
-      - name: Check out source
-        uses: actions/checkout@v5
-      - name: Set up Node 24
-        uses: actions/setup-node@v5
-        with:
-          node-version: 24
-          cache: pnpm
-      - name: Set up pnpm
-        uses: pnpm/action-setup@v4
-        with:
-          version: 10.18.2
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v5
+        with: { node-version: 24, cache: pnpm }
+      - uses: pnpm/action-setup@v4
+        with: { version: 10.18.2 }
       - name: Install with frozen lockfile
         run: pnpm install --frozen-lockfile
       - name: Format check
@@ -36,36 +30,56 @@ jobs:
         run: pnpm architecture
       - name: Unit tests
         run: pnpm test
-      - name: Configuration bundle schema and exclusion scan
-        run: pnpm config:verify
+      - name: Integration tests
+        run: pnpm test:integration
+      - name: Contract tests
+        run: pnpm test -- tests/contracts
       - name: Security test gate
         run: pnpm test:security
-      - name: Build all workspaces
-        run: pnpm build
+      - name: Configuration bundle schema and exclusion scan
+        run: pnpm config:verify
       - name: Explicit console production build
         run: pnpm --filter @pirh/console build
+      - name: Lambda and CDK bundle build
+        run: pnpm --filter @pirh/cdk synth
+      - name: OpenAPI drift
+        run: pnpm openapi:check
       - name: High-severity dependency audit
         run: pnpm audit
       - name: Source and configuration secret scan
         run: pnpm secret:scan
-  local-platform:
-    name: Local platform smoke
+  compose-smoke:
+    name: Compose build and smoke
     runs-on: ubuntu-24.04
     steps:
-      - name: Check out source
-        uses: actions/checkout@v5
-      - name: Set up Node 24
-        uses: actions/setup-node@v5
-        with:
-          node-version: 24
-          cache: pnpm
-      - name: Set up pnpm
-        uses: pnpm/action-setup@v4
-        with:
-          version: 10.18.2
-      - name: Install with frozen lockfile
-        run: pnpm install --frozen-lockfile
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v5
+        with: { node-version: 24, cache: pnpm }
+      - uses: pnpm/action-setup@v4
+        with: { version: 10.18.2 }
+      - run: pnpm install --frozen-lockfile
       - name: Install Playwright Chromium
         run: pnpm exec playwright install --with-deps chromium
-      - name: Verify Compose topology
+      - name: Verify default and observability Compose profiles
         run: pnpm local:verify
+  container-scan:
+    name: Container scan
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v5
+      - uses: aquasecurity/trivy-action@0.33.1
+        with:
+          {
+            scan-type: fs,
+            scan-ref: .,
+            severity: HIGH,
+            CRITICAL,
+            exit-code: "1",
+          }
+  m11-hybrid-guard:
+    name: M11 hybrid guard
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v5
+      - name: Assert hybrid implementation stays deferred
+        run: test ! -e infrastructure/hybrid

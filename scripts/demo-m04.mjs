@@ -70,17 +70,22 @@ if (
 )
   throw new Error(`Duplicate submission failed: ${JSON.stringify(duplicate)}`);
 let status;
-for (let attempt = 0; attempt < 40; attempt += 1) {
+let lastStatus = "not queried";
+const deliveryDeadline = Date.now() + 60_000;
+while (Date.now() < deliveryDeadline) {
   const path = `/api/v1/events/${accepted.eventId}`;
   const response = await fetch(`${baseUrl}${path}`, {
     headers: signedHeaders("GET", path),
   });
   status = await response.json();
+  lastStatus = JSON.stringify(status);
   if (response.ok && status.status === "succeeded") break;
   await new Promise((resolve) => setTimeout(resolve, 500));
 }
 if (status?.status !== "succeeded")
-  throw new Error(`Delivery did not succeed: ${JSON.stringify(status)}`);
+  throw new Error(
+    `Delivery did not succeed within the 60s policy-aware deadline: ${lastStatus}`,
+  );
 let partnerOutcomes = "not checked";
 if (controlToken !== undefined) {
   const captures = await Promise.all(

@@ -15,19 +15,29 @@ import {
 import { executeTransformation } from "@pirh/transformation";
 
 const region = process.env.AWS_REGION ?? "us-east-1";
+const local = (process.env.APP_ENV ?? "local") === "local";
 const runtime = createTelemetryRuntime({
   service: "router-worker",
   environment: process.env.APP_ENV ?? "local",
   otlpEndpoint: process.env.PIRH_OTLP_ENDPOINT,
   logLevel: process.env.LOG_LEVEL,
 });
-const credentials = { accessKeyId: "local", secretAccessKey: "local" };
+const awsConfig = local
+  ? {
+      credentials: { accessKeyId: "local", secretAccessKey: "local" },
+    }
+  : {};
 const persistence = new DynamoPersistence(
   DynamoDBDocumentClient.from(
     new DynamoDBClient({
       region,
-      endpoint: process.env.DYNAMODB_ENDPOINT ?? "http://dynamodb-local:8000",
-      credentials,
+      ...awsConfig,
+      ...(local
+        ? {
+            endpoint:
+              process.env.DYNAMODB_ENDPOINT ?? "http://dynamodb-local:8000",
+          }
+        : {}),
     }),
   ),
   {
@@ -41,7 +51,7 @@ const ids = {
   next: (prefix: string) =>
     `${prefix}_${`${Date.now().toString(32).toUpperCase()}${(++sequence).toString(32).toUpperCase()}`.padEnd(26, "0").slice(0, 26)}`,
 };
-const service = new RoutingService({
+export const routerService = new RoutingService({
   core: persistence,
   repository: persistence,
   execute: executeTransformation,
@@ -53,8 +63,10 @@ const service = new RoutingService({
 const queue = new ElasticMqQueue(
   createSqsClient({
     region,
-    endpoint: process.env.ELASTICMQ_ENDPOINT ?? "http://elasticmq:9324",
-    credentials,
+    ...awsConfig,
+    ...(local
+      ? { endpoint: process.env.ELASTICMQ_ENDPOINT ?? "http://elasticmq:9324" }
+      : {}),
   }),
   process.env.ROUTING_QUEUE_NAME ?? "pirh-routing-local",
 );
@@ -63,33 +75,39 @@ for (const signal of ["SIGINT", "SIGTERM"] as const)
   process.on(signal, () => {
     stopping = true;
   });
-while (!stopping) {
-  try {
-    await consumeOne(queue, async (message, raw) => {
-      if (message.messageType !== "ROUTE_EVENT") return;
-      await withExtractedTrace(
-        queueTraceparent(raw),
-        "routing.consume",
-        {
-          messageType: message.messageType,
-          correlationId: message.correlationId,
-          eventId: message.eventId,
-          tenantId: message.tenantId,
-        },
-        async () => {
-          await service.route(message as never);
-          runtime.logger.info("Routing completed", {
-            event: "routing.completed",
+export async function runLocal(): Promise<void> {
+  while (!stopping) {
+    try {
+      await consumeOne(queue, async (message, raw) => {
+        if (message.messageType !== "ROUTE_EVENT") return;
+        await withExtractedTrace(
+          queueTraceparent(raw),
+          "routing.consume",
+          {
+            messageType: message.messageType,
             correlationId: message.correlationId,
             eventId: message.eventId,
             tenantId: message.tenantId,
-          });
-        },
-      );
-    });
-  } catch (error) {
-    runtime.logger.error("Routing failed", { event: "routing.failed", error });
+          },
+          async () => {
+            await routerService.route(message as never);
+            runtime.logger.info("Routing completed", {
+              event: "routing.completed",
+              correlationId: message.correlationId,
+              eventId: message.eventId,
+              tenantId: message.tenantId,
+            });
+          },
+        );
+      });
+    } catch (error) {
+      runtime.logger.error("Routing failed", {
+        event: "routing.failed",
+        error,
+      });
+    }
   }
+  await runtime.shutdown();
 }
-await runtime.shutdown();
+if (process.argv[1]?.endsWith("index.js")) void runLocal();
 export {};

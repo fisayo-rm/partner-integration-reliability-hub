@@ -117,5 +117,5 @@ if (process.argv[1]?.endsWith("index.js")) {
     controlToken: process.env.MOCK_CONTROL_TOKEN ?? "control",
     timeoutMs: Number(process.env.MOCK_TIMEOUT_MS ?? 500),
   });
-  await app.listen({ host: "0.0.0.0", port: Number(process.env.PORT ?? 4011) });
+  void app.listen({ host: "0.0.0.0", port: Number(process.env.PORT ?? 4011) });
 }

@@ -32,12 +32,19 @@
     "demo:m06": "node scripts/demo-m06.mjs",
     "demo:m07": "node scripts/demo-m07.mjs",
     "demo:m09": "node scripts/demo-m09.mjs",
+    "cdk:synth": "pnpm --filter @pirh/cdk synth",
+    "seed:demo": "node scripts/seed-demo.mjs",
+    "smoke:hosted": "node scripts/smoke-hosted.mjs",
+    "openapi:check": "node scripts/check-openapi-drift.mjs",
+    "wrangler": "wrangler",
     "config": "pnpm --filter @pirh/config-cli... build && node apps/config-cli/dist/index.js",
     "config:verify": "vitest run tests/config-portability.test.ts",
     "verify": "pnpm format:check && pnpm lint && pnpm typecheck && pnpm test:typecheck && pnpm architecture && pnpm test && pnpm test:security && pnpm config:verify && pnpm build && pnpm secret:scan && pnpm audit"
   },
   "devDependencies": {
     "@aws-sdk/client-dynamodb": "3.1111.0",
+    "@aws-sdk/client-cognito-identity-provider": "3.1111.0",
+    "@aws-sdk/client-ssm": "3.1111.0",
     "@aws-sdk/lib-dynamodb": "3.1111.0",
     "@eslint/js": "9.35.0",
     "@playwright/test": "1.55.1",
@@ -49,7 +56,8 @@
     "typescript": "5.9.2",
     "typescript-eslint": "8.43.0",
     "vitest": "4.1.11",
-    "yaml": "2.8.3"
+    "yaml": "2.8.3",
+    "wrangler": "4.125.0"
   },
   "dependencies": {
     "@opentelemetry/api": "^1.9.1",

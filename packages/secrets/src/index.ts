@@ -4,6 +4,11 @@ import {
   TransactWriteCommand,
   type DynamoDBDocumentClient,
 } from "@aws-sdk/lib-dynamodb";
+import {
+  GetParameterCommand,
+  PutParameterCommand,
+  type SSMClient,
+} from "@aws-sdk/client-ssm";
 import type { SecretReference, TenantContext } from "@pirh/domain";
 import type { SecretStore } from "@pirh/application";
 
@@ -160,5 +165,96 @@ export class LocalDynamoDbSecretStore implements SecretStore {
       }),
     );
     return typeof response.Item?.version === "string";
+  }
+}
+
+/**
+ * Hosted secret adapter. The parameter name is deliberately derived from the
+ * tenant and logical alias only: parameter versions are SSM versions, not a
+ * second namespace that can drift from the reference stored with the entity.
+ */
+export class SsmParameterSecretStore implements SecretStore {
+  public constructor(
+    private readonly client: SSMClient,
+    private readonly prefix = "/pirh/demo/tenants",
+  ) {}
+
+  private name(context: TenantContext, alias: string): string {
+    if (!/^[A-Za-z0-9._-]{1,160}$/.test(alias))
+      throw new Error("Secret alias contains unsupported characters.");
+    return `${this.prefix}/${context.tenantId}/secrets/${alias}`;
+  }
+
+  public async store(
+    context: TenantContext,
+    input: {
+      readonly name: string;
+      readonly value: string;
+      readonly version?: string;
+    },
+  ): Promise<SecretReference> {
+    if (input.version !== undefined)
+      throw new Error("SSM assigns immutable secret versions.");
+    const response = await this.client.send(
+      new PutParameterCommand({
+        Name: this.name(context, input.name),
+        Value: input.value,
+        Type: "SecureString",
+        Overwrite: true,
+        Tier: "Standard",
+      }),
+    );
+    if (response.Version === undefined)
+      throw new Error("Secret parameter version was not returned.");
+    return { name: input.name, version: String(response.Version) };
+  }
+
+  public async resolve(
+    context: TenantContext,
+    reference: SecretReference,
+  ): Promise<{ readonly value: string; readonly version?: string }> {
+    const name = this.name(context, reference.name);
+    const response = await this.client.send(
+      new GetParameterCommand({
+        Name:
+          reference.version === undefined
+            ? name
+            : `${name}:${reference.version}`,
+        WithDecryption: true,
+      }),
+    );
+    if (
+      response.Parameter?.Value === undefined ||
+      response.Parameter.Version === undefined
+    )
+      throw new Error("Secret reference could not be resolved.");
+    return {
+      value: response.Parameter.Value,
+      version: String(response.Parameter.Version),
+    };
+  }
+
+  public async isBound(
+    context: TenantContext,
+    alias: string,
+  ): Promise<boolean> {
+    try {
+      const response = await this.client.send(
+        new GetParameterCommand({
+          Name: this.name(context, alias),
+          WithDecryption: false,
+        }),
+      );
+      return response.Parameter?.Version !== undefined;
+    } catch (error) {
+      if (
+        typeof error === "object" &&
+        error !== null &&
+        "name" in error &&
+        error.name === "ParameterNotFound"
+      )
+        return false;
+      throw error;
+    }
   }
 }

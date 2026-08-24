@@ -15,6 +15,7 @@ const response = await fetch("http://localhost:4012/__control/mode", {
 if (!response.ok)
   throw new Error("Could not configure transient Beta failure.");
 
+const startedAt = Date.now();
 await new Promise((resolve, reject) => {
   const child = spawn("node", ["scripts/demo-m04.mjs"], {
     stdio: "inherit",
@@ -34,4 +35,14 @@ await fetch("http://localhost:4012/__control/mode", {
   },
   body: JSON.stringify({ mode: "success" }),
 });
-console.log("M05 transient retry demonstration passed.");
+const elapsedMs = Date.now() - startedAt;
+if (elapsedMs > 60_000)
+  throw new Error(`M05 retry policy deadline exceeded after ${elapsedMs}ms.`);
+console.log(
+  JSON.stringify({
+    demonstration:
+      "Beta 503 produced a retry-scheduled delivery and attempt-two success",
+    elapsedMs,
+    deadlineMs: 60_000,
+  }),
+);

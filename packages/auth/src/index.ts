@@ -27,6 +27,8 @@ export interface OidcVerifierConfig {
   readonly tokenUseClaim?: string;
   readonly tokenUseValue?: string;
   readonly roleClaim?: string;
+  /** Cognito access tokens identify a public app client through client_id, not aud. */
+  readonly audienceClaim?: string;
 }
 function stringArray(value: unknown): readonly string[] {
   return Array.isArray(value)
@@ -42,9 +44,19 @@ export class OidcAccessTokenVerifier implements IdentityProvider {
     try {
       const verified = await jwtVerify(token, this.jwks, {
         issuer: this.config.issuer,
-        audience: this.config.audience,
         algorithms: [...this.config.allowedAlgorithms],
       });
+      const audience = verified.payload[this.config.audienceClaim ?? "aud"];
+      const audiences =
+        typeof audience === "string"
+          ? [audience]
+          : Array.isArray(audience)
+            ? audience.filter(
+                (value): value is string => typeof value === "string",
+              )
+            : [];
+      if (!audiences.includes(this.config.audience))
+        throw new AuthenticationError();
       if (
         this.config.tokenUseClaim !== undefined &&
         verified.payload[this.config.tokenUseClaim] !==

@@ -1,5 +1,6 @@
 import { DynamoDBClient } from "@aws-sdk/client-dynamodb";
 import { DynamoDBDocumentClient } from "@aws-sdk/lib-dynamodb";
+import { SSMClient } from "@aws-sdk/client-ssm";
 import { DeliveryService, type OAuthTokenProvider } from "@pirh/application";
 import {
   addTraceAttributes,
@@ -14,32 +15,45 @@ import {
   parseQueueMessage,
   queueTraceparent,
 } from "@pirh/queue";
-import { LocalDynamoDbSecretStore } from "@pirh/secrets";
+import {
+  LocalDynamoDbSecretStore,
+  SsmParameterSecretStore,
+} from "@pirh/secrets";
 
 const region = process.env.AWS_REGION ?? "us-east-1";
+const local = (process.env.APP_ENV ?? "local") === "local";
 const runtime = createTelemetryRuntime({
   service: "delivery-worker",
   environment: process.env.APP_ENV ?? "local",
   otlpEndpoint: process.env.PIRH_OTLP_ENDPOINT,
   logLevel: process.env.LOG_LEVEL,
 });
-const credentials = { accessKeyId: "local", secretAccessKey: "local" };
+const awsConfig = local
+  ? { credentials: { accessKeyId: "local", secretAccessKey: "local" } }
+  : {};
 const coreTableName = process.env.CORE_TABLE_NAME ?? "pirh-core-local";
 const documentClient = DynamoDBDocumentClient.from(
   new DynamoDBClient({
     region,
-    endpoint: process.env.DYNAMODB_ENDPOINT ?? "http://dynamodb-local:8000",
-    credentials,
+    ...awsConfig,
+    ...(local
+      ? {
+          endpoint:
+            process.env.DYNAMODB_ENDPOINT ?? "http://dynamodb-local:8000",
+        }
+      : {}),
   }),
 );
-const persistence = new DynamoPersistence(documentClient, {
+export const persistence = new DynamoPersistence(documentClient, {
   coreTableName,
   auditTableName: process.env.AUDIT_TABLE_NAME ?? "pirh-audit-local",
   outboxShardCount: Number(process.env.OUTBOX_SHARD_COUNT ?? 8),
 });
 const http = new SafePartnerHttpClient({
-  mode: "local",
-  localHttpHostnames: ["mock-partner-alpha", "mock-partner-beta"],
+  mode: local ? "local" : "hosted",
+  ...(local
+    ? { localHttpHostnames: ["mock-partner-alpha", "mock-partner-beta"] }
+    : {}),
 });
 const cache = new Map<
   string,
@@ -101,13 +115,18 @@ const ids = {
       .join("")}`;
   },
 };
-const service = new DeliveryService({
+export const deliveryService = new DeliveryService({
   core: persistence,
   repository: persistence,
-  secrets: new LocalDynamoDbSecretStore(documentClient, {
-    coreTableName,
-    masterKeyBase64: process.env.LOCAL_SECRET_MASTER_KEY_B64 ?? "",
-  }),
+  secrets: local
+    ? new LocalDynamoDbSecretStore(documentClient, {
+        coreTableName,
+        masterKeyBase64: process.env.LOCAL_SECRET_MASTER_KEY_B64 ?? "",
+      })
+    : new SsmParameterSecretStore(
+        new SSMClient({ region }),
+        process.env.SSM_SECRET_PREFIX ?? "/pirh/demo/tenants",
+      ),
   http,
   oauth,
   ids: ids as never,
@@ -117,8 +136,10 @@ const service = new DeliveryService({
 const queue = new ElasticMqQueue(
   createSqsClient({
     region,
-    endpoint: process.env.ELASTICMQ_ENDPOINT ?? "http://elasticmq:9324",
-    credentials,
+    ...awsConfig,
+    ...(local
+      ? { endpoint: process.env.ELASTICMQ_ENDPOINT ?? "http://elasticmq:9324" }
+      : {}),
   }),
   process.env.DELIVERY_QUEUE_NAME ?? "pirh-delivery-local",
 );
@@ -127,84 +148,87 @@ for (const signal of ["SIGINT", "SIGTERM"] as const)
   process.on(signal, () => {
     stopping = true;
   });
-while (!stopping) {
-  try {
-    const messages = await queue.receive(
-      Number(process.env.DELIVERY_WORKER_CONCURRENCY ?? 5),
-      5,
-      Number(process.env.DELIVERY_VISIBILITY_TIMEOUT_SECONDS ?? 360),
-    );
-    const results = await Promise.allSettled(
-      messages.map((raw) =>
-        withExtractedTrace(
-          queueTraceparent(raw),
-          "delivery.consume",
-          { queue: "delivery" },
-          async () => {
-            const message = parseQueueMessage(raw);
-            if (message.messageType === "DELIVER") {
-              addTraceAttributes({
-                correlationId: message.correlationId,
-                eventId: message.eventId,
-                deliveryId: message.deliveryId,
-                tenantId: message.tenantId,
-              });
-              runtime.telemetry.count("queue.delivery_received");
-            }
-            if (message.messageType === "RESUME_DESTINATION")
-              await persistence.resumeDestination({
-                context: {
-                  tenantId: message.tenantId as never,
-                  actorType: "system",
-                  actorId: "delivery-worker",
-                  requestId: "resume-destination",
-                  correlationId: message.correlationId as never,
-                },
-                destinationId: message.destinationId as never,
-                now: new Date(),
-              });
-            else if (message.messageType === "DELIVER") {
-              const outcome = await service.deliver({
-                ...message,
-                owner: process.env.HOSTNAME ?? "delivery-worker",
-              } as never);
-              if (!outcome.acknowledge) {
-                await queue.defer(raw, outcome.delaySeconds ?? 5);
-                runtime.logger.info("Delivery deferred", {
-                  event: "delivery.deferred",
+export async function runLocal(): Promise<void> {
+  while (!stopping) {
+    try {
+      const messages = await queue.receive(
+        Number(process.env.DELIVERY_WORKER_CONCURRENCY ?? 5),
+        5,
+        Number(process.env.DELIVERY_VISIBILITY_TIMEOUT_SECONDS ?? 360),
+      );
+      const results = await Promise.allSettled(
+        messages.map((raw) =>
+          withExtractedTrace(
+            queueTraceparent(raw),
+            "delivery.consume",
+            { queue: "delivery" },
+            async () => {
+              const message = parseQueueMessage(raw);
+              if (message.messageType === "DELIVER") {
+                addTraceAttributes({
                   correlationId: message.correlationId,
                   eventId: message.eventId,
                   deliveryId: message.deliveryId,
-                  delaySeconds: outcome.delaySeconds ?? 5,
                   tenantId: message.tenantId,
                 });
-                return;
+                runtime.telemetry.count("queue.delivery_received");
               }
-              runtime.logger.info("Delivery completed", {
-                event: "delivery.completed",
-                correlationId: message.correlationId,
-                eventId: message.eventId,
-                deliveryId: message.deliveryId,
-                tenantId: message.tenantId,
-              });
-            }
-            await queue.delete(raw);
-          },
+              if (message.messageType === "RESUME_DESTINATION")
+                await persistence.resumeDestination({
+                  context: {
+                    tenantId: message.tenantId as never,
+                    actorType: "system",
+                    actorId: "delivery-worker",
+                    requestId: "resume-destination",
+                    correlationId: message.correlationId as never,
+                  },
+                  destinationId: message.destinationId as never,
+                  now: new Date(),
+                });
+              else if (message.messageType === "DELIVER") {
+                const outcome = await deliveryService.deliver({
+                  ...message,
+                  owner: process.env.HOSTNAME ?? "delivery-worker",
+                } as never);
+                if (!outcome.acknowledge) {
+                  await queue.defer(raw, outcome.delaySeconds ?? 5);
+                  runtime.logger.info("Delivery deferred", {
+                    event: "delivery.deferred",
+                    correlationId: message.correlationId,
+                    eventId: message.eventId,
+                    deliveryId: message.deliveryId,
+                    delaySeconds: outcome.delaySeconds ?? 5,
+                    tenantId: message.tenantId,
+                  });
+                  return;
+                }
+                runtime.logger.info("Delivery completed", {
+                  event: "delivery.completed",
+                  correlationId: message.correlationId,
+                  eventId: message.eventId,
+                  deliveryId: message.deliveryId,
+                  tenantId: message.tenantId,
+                });
+              }
+              await queue.delete(raw);
+            },
+          ),
         ),
-      ),
-    );
-    for (const result of results)
-      if (result.status === "rejected")
-        runtime.logger.error("Delivery failed", {
-          event: "delivery.failed",
-          error: result.reason,
-        });
-  } catch (error) {
-    runtime.logger.error("Delivery failed", {
-      event: "delivery.failed",
-      error,
-    });
+      );
+      for (const result of results)
+        if (result.status === "rejected")
+          runtime.logger.error("Delivery failed", {
+            event: "delivery.failed",
+            error: result.reason,
+          });
+    } catch (error) {
+      runtime.logger.error("Delivery failed", {
+        event: "delivery.failed",
+        error,
+      });
+    }
   }
+  await runtime.shutdown();
 }
-await runtime.shutdown();
+if (process.argv[1]?.endsWith("index.js")) void runLocal();
 export {};

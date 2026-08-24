@@ -131,6 +131,20 @@ reported rather than forced.
 - Infrastructure adapters remain in their own packages; applications compose them.
 - The React console consumes API contracts, never server implementation modules.
 
+## Hosted demo bootstrap (M10)
+
+The demo targets `us-east-1` and uses GitHub OIDC rather than long-lived AWS keys.
+Before the first deployment, bootstrap the account, create the GitHub `demo`
+environment with required branch protection, and configure only the documented
+environment-scoped variables and secrets: account ID, deploy-role ARN, Pages project
+name, Cloudflare account/token, and three demo-user bootstrap passwords. Then run
+`pnpm --filter @pirh/cdk synth`, inspect `cdk diff`, and deploy through the protected
+main workflow. The workflow creates the Cloudflare Pages project if it does not exist,
+seeds non-source SSM values, deploys static console assets, and records rollback inputs.
+
+Hosted rollback changes Lambda aliases and redeploys a recorded Pages artifact only;
+it never rewrites DynamoDB event, attempt, audit, or configuration history.
+
 The complete local Docker topology, service health checks, and all domain/API
 contracts are deliberately deferred to M01. See the frozen architecture baseline
 and accepted ADRs in the repository's agent-facing materials for the governing design.

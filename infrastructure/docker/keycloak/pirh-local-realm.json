@@ -96,6 +96,24 @@
           "temporary": false
         }
       ]
+    },
+    {
+      "id": "55555555-5555-4555-8555-555555555555",
+      "username": "target-admin@example.test",
+      "enabled": true,
+      "emailVerified": true,
+      "firstName": "Target",
+      "lastName": "Admin",
+      "requiredActions": [],
+      "email": "target-admin@example.test",
+      "realmRoles": ["admin"],
+      "credentials": [
+        {
+          "type": "password",
+          "value": "target-admin-demo-only",
+          "temporary": false
+        }
+      ]
     }
   ]
 }

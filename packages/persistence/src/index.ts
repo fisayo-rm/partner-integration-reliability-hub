@@ -346,6 +346,60 @@ export class DynamoPersistence
   ): Promise<Partner | undefined> {
     return this.getCore<Partner>(key.partner(context.tenantId, partnerId));
   }
+  public async getPartnerByExternalKey(
+    context: TenantContext,
+    externalKey: string,
+  ): Promise<Partner | undefined> {
+    const pointer = await this.getCore<{
+      readonly partnerId: Partner["partnerId"];
+    }>(key.externalKey(context.tenantId, "PARTNER", externalKey));
+    return pointer === undefined
+      ? undefined
+      : this.getPartner(context, pointer.partnerId);
+  }
+  public async getDestinationByExternalKey(
+    context: TenantContext,
+    externalKey: string,
+  ): Promise<Destination | undefined> {
+    const pointer = await this.getCore<{
+      readonly destinationId: Destination["destinationId"];
+    }>(key.externalKey(context.tenantId, "DESTINATION", externalKey));
+    return pointer === undefined
+      ? undefined
+      : this.getDestination(context, pointer.destinationId);
+  }
+  public async getSubscriptionByExternalKey(
+    context: TenantContext,
+    externalKey: string,
+  ): Promise<Subscription | undefined> {
+    const pointer = await this.getCore<{
+      readonly subscriptionId: Subscription["subscriptionId"];
+    }>(key.externalKey(context.tenantId, "SUBSCRIPTION", externalKey));
+    return pointer === undefined
+      ? undefined
+      : this.getCore<Subscription>(
+          key.subscriptionCatalog(context.tenantId, pointer.subscriptionId),
+        );
+  }
+  public async getTransformationByExternalKey(
+    context: TenantContext,
+    externalKey: string,
+  ): Promise<TransformationSummary | undefined> {
+    const pointer = await this.getCore<{
+      readonly transformationId: TransformationVersion["transformationId"];
+    }>(key.externalKey(context.tenantId, "TRANSFORMATION", externalKey));
+    if (pointer === undefined) return undefined;
+    const versions = await this.listTransformationVersions(
+      context,
+      pointer.transformationId,
+      { limit: 100 },
+    );
+    return {
+      transformationId: pointer.transformationId,
+      externalKey,
+      latestVersion: versions.items.at(-1)?.version ?? 0,
+    };
+  }
   public async listSubscriptions(
     context: TenantContext,
     eventType: string,
@@ -1407,6 +1461,54 @@ export class DynamoPersistence
       this.auditPut(audit),
     ]);
     return result === "ok" ? "created" : "conflict";
+  }
+  public async updateSubscription(
+    context: TenantContext,
+    subscription: Subscription,
+    expectedVersion: number,
+    audit: AuditEvent,
+  ): Promise<"updated" | "not_found" | "conflict"> {
+    const existing = await this.getCore<Subscription>(
+      key.subscriptionCatalog(context.tenantId, subscription.subscriptionId),
+    );
+    if (existing === undefined) return "not_found";
+    const result = await this.controlWrite([
+      {
+        Put: {
+          TableName: this.config.coreTableName,
+          Item: itemWithKeys(
+            subscription,
+            key.subscription(
+              context.tenantId,
+              subscription.eventType,
+              subscription.destinationId,
+            ),
+            "SUBSCRIPTION",
+          ),
+          ConditionExpression: "#version = :version",
+          ExpressionAttributeNames: { "#version": "version" },
+          ExpressionAttributeValues: { ":version": expectedVersion },
+        },
+      },
+      {
+        Put: {
+          TableName: this.config.coreTableName,
+          Item: itemWithKeys(
+            subscription,
+            key.subscriptionCatalog(
+              context.tenantId,
+              subscription.subscriptionId,
+            ),
+            "SUBSCRIPTION_CATALOG",
+          ),
+          ConditionExpression: "#version = :version",
+          ExpressionAttributeNames: { "#version": "version" },
+          ExpressionAttributeValues: { ":version": expectedVersion },
+        },
+      },
+      this.auditPut(audit),
+    ]);
+    return result === "ok" ? "updated" : "conflict";
   }
   public async deleteSubscription(
     context: TenantContext,

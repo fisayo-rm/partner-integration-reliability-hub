@@ -8,7 +8,10 @@ const composeEnvironment = {
   LOCAL_SEED_PRODUCER_SECRET: randomBytes(32).toString("base64url"),
   LOCAL_SEED_ALPHA_API_KEY: randomBytes(24).toString("base64url"),
   LOCAL_SEED_BETA_CLIENT_SECRET: randomBytes(24).toString("base64url"),
+  LOCAL_SEED_TARGET_ALPHA_API_KEY: randomBytes(24).toString("base64url"),
+  LOCAL_SEED_TARGET_BETA_CLIENT_SECRET: randomBytes(24).toString("base64url"),
   LOCAL_CURSOR_SECRET: randomBytes(32).toString("base64url"),
+  PORTABILITY_PLAN_SIGNING_KEY_B64: randomBytes(32).toString("base64"),
   MOCK_CONTROL_TOKEN: randomBytes(24).toString("base64url"),
 };
 const base = [
@@ -113,6 +116,7 @@ async function verify(profile) {
   await pnpm(["demo:m04"]);
   await pnpm(["demo:m05"]);
   await pnpm(["demo:m06"]);
+  await pnpm(["demo:m09"]);
   if (profile === undefined) await pnpm(["test:e2e"]);
   if (profile === "observability") {
     for (const [url, label, maxAttempts] of [

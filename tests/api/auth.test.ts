@@ -78,6 +78,7 @@ test("test-only Fastify routes establish trusted JWT and HMAC tenant context", a
     },
     {
       store: async () => ({ name: "unused" }),
+      isBound: async () => true,
       resolve: async () => ({ value: secret }),
     },
     { putIfAbsent: async () => true },

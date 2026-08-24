@@ -22,6 +22,9 @@ export default defineConfig({
       "@pirh/secrets": fileURLToPath(
         new URL("./packages/secrets/src/index.ts", import.meta.url),
       ),
+      "@pirh/config-portability": fileURLToPath(
+        new URL("./packages/config-portability/src/index.ts", import.meta.url),
+      ),
     },
   },
   test: {

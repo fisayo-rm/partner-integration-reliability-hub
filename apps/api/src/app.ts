@@ -37,6 +37,10 @@ import {
   type CoreRepository,
 } from "@pirh/application";
 import {
+  ConfigurationPortabilityError,
+  ConfigurationPortabilityService,
+} from "@pirh/config-portability";
+import {
   addTraceAttributes,
   withSpan,
   type RuntimeLogger,
@@ -87,6 +91,9 @@ export interface ApiDependencies {
     readonly consoleAuthenticator: ConsoleAuthenticator;
     readonly cursorSecret: string;
     readonly now?: () => Date;
+  };
+  readonly portability?: {
+    readonly service: ConfigurationPortabilityService;
   };
   readonly requestId?: () => string;
   readonly logger?: RuntimeLogger;
@@ -557,6 +564,14 @@ export async function buildApi(
             "Demo configuration limit reached.",
             request,
           );
+        if (caught instanceof ConfigurationPortabilityError)
+          return error(
+            reply,
+            caught.code === "PLAN_DRIFT" ? 409 : 400,
+            caught.code,
+            "Configuration portability request was rejected.",
+            request,
+          );
         return error(
           reply,
           400,
@@ -600,6 +615,82 @@ export async function buildApi(
           reply,
         ),
     );
+    const portability = dependencies.portability;
+    if (portability !== undefined) {
+      app.post(
+        "/api/v1/configuration/exports",
+        { preHandler: [authenticated, admin] },
+        async (request, reply) =>
+          mapError(
+            async () =>
+              portability.service.export(
+                context(request),
+                (request.body as { readonly tenant?: unknown } | undefined)
+                  ?.tenant as string | undefined,
+              ),
+            reply,
+            request,
+          ),
+      );
+      app.post(
+        "/api/v1/configuration/imports/validate",
+        { preHandler: [authenticated, admin] },
+        async (request, reply) =>
+          mapError(
+            async () => {
+              const bundle = await portability.service.validate(
+                context(request),
+                (request.body as { readonly bundle?: unknown } | undefined)
+                  ?.bundle,
+              );
+              return {
+                bundle,
+                digest: (
+                  await portability.service.plan(context(request), bundle)
+                ).digest,
+              };
+            },
+            reply,
+            request,
+          ),
+      );
+      app.post(
+        "/api/v1/configuration/imports/plan",
+        { preHandler: [authenticated, admin] },
+        async (request, reply) =>
+          mapError(
+            async () =>
+              portability.service.plan(
+                context(request),
+                (request.body as { readonly bundle?: unknown } | undefined)
+                  ?.bundle,
+              ),
+            reply,
+            request,
+          ),
+      );
+      app.post(
+        "/api/v1/configuration/imports/apply",
+        { preHandler: [authenticated, admin] },
+        async (request, reply) =>
+          mapError(
+            async () => {
+              const body = request.body as
+                | { readonly bundle?: unknown; readonly receipt?: unknown }
+                | undefined;
+              if (typeof body?.receipt !== "string")
+                throw new Error("VALIDATION_ERROR");
+              return portability.service.apply(
+                context(request),
+                body.bundle,
+                body.receipt,
+              );
+            },
+            reply,
+            request,
+          ),
+      );
+    }
     app.get(
       "/api/v1/partners/:partnerId",
       { preHandler: authenticated },

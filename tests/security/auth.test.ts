@@ -73,6 +73,7 @@ test("producer authentication derives the tenant from its locator and rejects re
     { locateClient: async () => ({ tenantId }), getClient: async () => client },
     {
       store: async () => ({ name: "unused" }),
+      isBound: async () => true,
       resolve: async (_context, ref) => ({
         value: ref.name === "current" ? secret : "old",
       }),

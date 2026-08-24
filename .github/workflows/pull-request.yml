@@ -36,6 +36,8 @@ jobs:
         run: pnpm architecture
       - name: Unit tests
         run: pnpm test
+      - name: Configuration bundle schema and exclusion scan
+        run: pnpm config:verify
       - name: Security test gate
         run: pnpm test:security
       - name: Build all workspaces

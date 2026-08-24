@@ -104,6 +104,9 @@ importers:
       "@pirh/auth":
         specifier: workspace:*
         version: link:../../packages/auth
+      "@pirh/config-portability":
+        specifier: workspace:*
+        version: link:../../packages/config-portability
       "@pirh/contracts":
         specifier: workspace:*
         version: link:../../packages/contracts
@@ -129,7 +132,11 @@ importers:
         specifier: 5.8.5
         version: 5.8.5
 
-  apps/config-cli: {}
+  apps/config-cli:
+    dependencies:
+      "@pirh/config-portability":
+        specifier: workspace:*
+        version: link:../../packages/config-portability
 
   apps/console:
     dependencies:
@@ -299,7 +306,23 @@ importers:
 
   packages/config: {}
 
-  packages/config-portability: {}
+  packages/config-portability:
+    dependencies:
+      "@pirh/application":
+        specifier: workspace:*
+        version: link:../application
+      "@pirh/contracts":
+        specifier: workspace:*
+        version: link:../contracts
+      "@pirh/domain":
+        specifier: workspace:*
+        version: link:../domain
+      yaml:
+        specifier: 2.8.3
+        version: 2.8.3
+      zod:
+        specifier: 4.1.5
+        version: 4.1.5
 
   packages/contracts:
     dependencies:

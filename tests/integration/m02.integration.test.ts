@@ -10,6 +10,8 @@ import {
   key,
 } from "../../packages/persistence/src/index.js";
 import { LocalDynamoDbSecretStore } from "../../packages/secrets/src/index.js";
+import { ConfigurationPortabilityService } from "../../packages/config-portability/src/index.js";
+import { executeTransformation } from "../../packages/transformation/src/index.js";
 import {
   AuthenticationError,
   ConsoleAuthenticator,
@@ -24,7 +26,10 @@ import type {
   TenantContext,
   TransformationVersion,
 } from "../../packages/domain/src/index.js";
-import { ReplayService } from "../../packages/application/src/index.js";
+import {
+  ControlPlaneService,
+  ReplayService,
+} from "../../packages/application/src/index.js";
 
 const suffix = randomBytes(6).toString("hex");
 const endpoint = process.env.DYNAMODB_ENDPOINT ?? "http://localhost:8000";
@@ -48,6 +53,10 @@ const tenantA =
   `tenant_01J0A1B2C3D4E5F6G7H8${suffix.slice(0, 6).toUpperCase()}` as never;
 const tenantB =
   `tenant_11J0A1B2C3D4E5F6G7H8${suffix.slice(0, 6).toUpperCase()}` as never;
+const tenantC =
+  `tenant_21J0A1B2C3D4E5F6G7H8${suffix.slice(0, 6).toUpperCase()}` as never;
+const tenantD =
+  `tenant_31J0A1B2C3D4E5F6G7H8${suffix.slice(0, 6).toUpperCase()}` as never;
 const context = (tenantId: TenantContext["tenantId"]): TenantContext => ({
   tenantId,
   actorType: "system",
@@ -62,6 +71,7 @@ beforeAll(async () => {
       ...key.tenant(tenantA),
       entityType: "TENANT",
       tenantId: tenantA,
+      externalKey: "tenant-a",
       name: "A",
       status: "active",
       createdAt: new Date().toISOString(),
@@ -71,7 +81,30 @@ beforeAll(async () => {
       ...key.tenant(tenantB),
       entityType: "TENANT",
       tenantId: tenantB,
+      externalKey: "tenant-b",
       name: "B",
+      status: "active",
+      createdAt: new Date().toISOString(),
+      version: 1,
+    },
+    {
+      ...key.tenant(tenantC),
+      entityType: "TENANT",
+      tenantId: tenantC,
+      // A target environment represents the same logical tenant with a
+      // different physical tenant identifier and independently bound aliases.
+      externalKey: "m09-tenant",
+      name: "A target",
+      status: "active",
+      createdAt: new Date().toISOString(),
+      version: 1,
+    },
+    {
+      ...key.tenant(tenantD),
+      entityType: "TENANT",
+      tenantId: tenantD,
+      externalKey: "m09-tenant",
+      name: "M09 source",
       status: "active",
       createdAt: new Date().toISOString(),
       version: 1,
@@ -135,6 +168,152 @@ test("nonces are conditional, TTL uses epoch seconds, and local secret ciphertex
   await expect(secrets.resolve(context(tenantB), reference)).rejects.toThrow(
     "could not be resolved",
   );
+});
+test("M09 exports, plans, applies, and reapplies configuration without moving secret material", async () => {
+  const source = {
+    ...context(tenantD),
+    actorType: "console_user" as const,
+    actorId: `m09-source-${suffix}`,
+    role: "admin" as const,
+  };
+  const target = {
+    ...context(tenantC),
+    actorType: "console_user" as const,
+    actorId: `m09-target-${suffix}`,
+    role: "admin" as const,
+  };
+  const secrets = new LocalDynamoDbSecretStore(documentClient, {
+    coreTableName,
+    masterKeyBase64: masterKey,
+  });
+  const ids = (() => {
+    let index = 0;
+    return {
+      next(prefix: string) {
+        index += 1;
+        return `${prefix}_01J0A1B2C3D4E5F6G7H${String(index).padStart(6, "0")}`;
+      },
+    };
+  })();
+  const control = new ControlPlaneService({
+    repository: persistence,
+    audit: persistence,
+    secrets,
+    endpoints: { validateUrl: async () => undefined },
+    execute: executeTransformation,
+    ids: ids as never,
+    clock: { now: () => new Date() },
+  });
+  const suffixKey = suffix.toLowerCase();
+  const partnerKey = `m09-partner-${suffixKey}`;
+  const transformationKey = `m09-transform-${suffixKey}`;
+  const destinationKey = `m09-destination-${suffixKey}`;
+  const subscriptionKey = `m09-subscription-${suffixKey}`;
+  const alias = `m09-alias-${suffixKey}`;
+  const partner = await control.createPartner(source, {
+    name: "M09 source partner",
+    externalKey: partnerKey,
+    enabled: true,
+  });
+  const transformation = await control.createTransformation(source, {
+    externalKey: transformationKey,
+    definition: {
+      schemaVersion: 1,
+      contentType: "application/json",
+      mappings: [{ target: "$.id", source: "$.eventId", required: true }],
+    } as never,
+  });
+  const destination = await control.createDestination(source, {
+    partnerId: partner.partnerId,
+    name: "M09 source destination",
+    externalKey: destinationKey as never,
+    baseUrl: "https://example.test",
+    path: "/hooks/m09",
+    method: "POST",
+    enabled: true,
+    authType: "api_key",
+    authConfiguration: {
+      headerName: "X-API-Key",
+      idempotencyHeader: "Idempotency-Key",
+    },
+    credential: { alias, value: `source-secret-${suffix}` },
+    timeoutMs: 1_000,
+    retryPolicy: {
+      maxAttempts: 2,
+      initialDelaySeconds: 1,
+      multiplier: 2,
+      maxDelaySeconds: 10,
+      jitter: "FULL_UPPER_HALF",
+    },
+    rateLimitPolicy: {
+      requestsPerInterval: 1,
+      intervalSeconds: 1,
+      burstCapacity: 1,
+      safetyFactor: 1,
+    },
+    circuitBreakerPolicy: {
+      failureThreshold: 2,
+      cooldownSeconds: 1,
+      probeLeaseSeconds: 1,
+    },
+    transformationId: transformation.transformationId,
+    activeTransformationVersion: 1,
+    sensitiveResponseJsonPaths: [],
+  });
+  await control.createSubscription(source, {
+    externalKey: subscriptionKey,
+    destinationId: destination.destinationId,
+    eventType: "shipment.status_changed",
+    enabled: true,
+  });
+  await secrets.store(target, {
+    name: alias,
+    version: "target-v1",
+    value: `target-secret-${suffix}`,
+  });
+  const signingKey = Buffer.alloc(32, 9).toString("base64");
+  const sourcePortability = new ConfigurationPortabilityService({
+    repository: persistence,
+    service: control,
+    secrets,
+    audit: persistence,
+    ids: ids as never,
+    sourceEnvironment: "integration-source",
+    planSigningKeyBase64: signingKey,
+  });
+  const targetPortability = new ConfigurationPortabilityService({
+    repository: persistence,
+    service: control,
+    secrets,
+    audit: persistence,
+    ids: ids as never,
+    sourceEnvironment: "integration-target",
+    planSigningKeyBase64: signingKey,
+  });
+  const exported = await sourcePortability.export(source, "m09-tenant");
+  expect(exported.yaml).toContain(alias);
+  expect(exported.yaml).not.toContain(`source-secret-${suffix}`);
+  const plan = await targetPortability.plan(target, exported.bundle);
+  expect(plan.items).toHaveLength(4);
+  expect(plan.items.every((item) => item.action === "CREATE")).toBe(true);
+  const applied = await targetPortability.apply(
+    target,
+    exported.bundle,
+    plan.receipt,
+  );
+  expect(applied.items.every((item) => item.outcome === "APPLIED")).toBe(true);
+  await expect(secrets.resolve(target, { name: alias })).resolves.toMatchObject(
+    {
+      value: `target-secret-${suffix}`,
+    },
+  );
+  const rerun = await targetPortability.plan(target, exported.bundle);
+  expect(rerun.items.every((item) => item.action === "UNCHANGED")).toBe(true);
+  expect(
+    (await persistence.list(target, { limit: 100 })).items.some(
+      (item) => item.action === "configuration.import_applied",
+    ),
+  ).toBe(true);
 });
 test("event/idempotency/outbox persistence is atomic and duplicate-safe", async () => {
   const now = new Date().toISOString() as never;

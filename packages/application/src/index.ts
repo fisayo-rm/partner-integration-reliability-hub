@@ -97,6 +97,22 @@ export interface CoreRepository {
 }
 /** Control-plane access remains tenant scoped; persistence adapters own key details. */
 export interface ControlPlaneRepository {
+  getPartnerByExternalKey(
+    context: TenantContext,
+    externalKey: string,
+  ): Promise<Partner | undefined>;
+  getDestinationByExternalKey(
+    context: TenantContext,
+    externalKey: string,
+  ): Promise<Destination | undefined>;
+  getSubscriptionByExternalKey(
+    context: TenantContext,
+    externalKey: string,
+  ): Promise<Subscription | undefined>;
+  getTransformationByExternalKey(
+    context: TenantContext,
+    externalKey: string,
+  ): Promise<TransformationSummary | undefined>;
   listPartners(
     context: TenantContext,
     input: { readonly limit: number; readonly cursor?: string },
@@ -159,6 +175,12 @@ export interface ControlPlaneRepository {
     subscription: Subscription,
     audit: AuditEvent,
   ): Promise<"created" | "conflict" | "not_found">;
+  updateSubscription(
+    context: TenantContext,
+    subscription: Subscription,
+    expectedVersion: number,
+    audit: AuditEvent,
+  ): Promise<"updated" | "not_found" | "conflict">;
   deleteSubscription(
     context: TenantContext,
     subscriptionId: Subscription["subscriptionId"],
@@ -444,6 +466,8 @@ export interface SecretStore {
     context: TenantContext,
     reference: SecretReference,
   ): Promise<{ readonly value: string; readonly version?: string }>;
+  /** Checks a logical alias without materializing a secret value. */
+  isBound(context: TenantContext, alias: string): Promise<boolean>;
 }
 export interface IdentityProvider {
   verifyAccessToken(token: string): Promise<{
@@ -775,12 +799,62 @@ export class ControlPlaneService {
       );
     return destination;
   }
+  /**
+   * Import-only counterpart to createDestination. The alias was validated by
+   * the portability service and is deliberately never resolved here.
+   */
+  public async createDestinationFromAlias(
+    context: TenantContext,
+    input: Omit<
+      Destination,
+      "destinationId" | "tenantId" | "secretReferences" | "version"
+    > & { readonly secretAlias: string },
+  ): Promise<Destination> {
+    await this.dependencies.endpoints.validateUrl(
+      new URL(input.path, input.baseUrl).toString(),
+    );
+    const { secretAlias, ...configuration } = input;
+    const at = this.dependencies.clock.now().toISOString() as never;
+    const destination: Destination = {
+      ...configuration,
+      destinationId: this.dependencies.ids.next(
+        "dst",
+      ) as Destination["destinationId"],
+      tenantId: context.tenantId,
+      secretReferences: [{ name: secretAlias }],
+      version: 1,
+    };
+    const result = await this.dependencies.repository.createDestination(
+      context,
+      destination,
+      this.audit(
+        context,
+        "destination.imported",
+        "DESTINATION",
+        destination.destinationId,
+        {
+          externalKey: destination.externalKey,
+          importedAt: at,
+        },
+      ),
+    );
+    if (result !== "created")
+      throw new Error(
+        result === "not_found"
+          ? "NOT_FOUND"
+          : result === "limit"
+            ? "DESTINATION_LIMIT"
+            : "CONFLICT",
+      );
+    return destination;
+  }
   public async updateDestination(
     context: TenantContext,
     existing: Destination,
     expectedVersion: number,
     input: Partial<Destination> & {
       readonly credential?: { readonly alias: string; readonly value: string };
+      readonly credentialAlias?: string;
     },
   ): Promise<Destination> {
     if (input.baseUrl !== undefined || input.path !== undefined)
@@ -804,8 +878,11 @@ export class ControlPlaneService {
       const secret = await this.credential(context, input.credential);
       secretReferences = [{ name: secret.name }];
     }
+    if (input.credentialAlias !== undefined)
+      secretReferences = [{ name: input.credentialAlias }];
     const changes = { ...input } as Record<string, unknown>;
     delete changes.credential;
+    delete changes.credentialAlias;
     delete changes.authentication;
     const destination: Destination = {
       ...existing,
@@ -872,6 +949,7 @@ export class ControlPlaneService {
       eventType: input.eventType,
       enabled: input.enabled,
       createdAt: at,
+      version: 1,
     };
     if (
       (await this.dependencies.repository.createSubscription(
@@ -887,6 +965,37 @@ export class ControlPlaneService {
       )) !== "created"
     )
       throw new Error("CONFLICT");
+    return subscription;
+  }
+  public async updateSubscription(
+    context: TenantContext,
+    existing: Subscription,
+    expectedVersion: number,
+    input: { readonly enabled: boolean },
+  ): Promise<Subscription> {
+    const subscription: Subscription = {
+      ...existing,
+      enabled: input.enabled,
+      version: existing.version + 1,
+    };
+    const result = await this.dependencies.repository.updateSubscription(
+      context,
+      subscription,
+      expectedVersion,
+      this.audit(
+        context,
+        "subscription.updated",
+        "SUBSCRIPTION",
+        subscription.subscriptionId,
+        {
+          version: subscription.version,
+        },
+      ),
+    );
+    if (result !== "updated")
+      throw new Error(
+        result === "not_found" ? "NOT_FOUND" : "PRECONDITION_FAILED",
+      );
     return subscription;
   }
   public async deleteSubscription(

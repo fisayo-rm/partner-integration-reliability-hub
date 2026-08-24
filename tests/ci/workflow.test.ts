@@ -23,6 +23,7 @@ test("pull-request workflow runs Stage A and the local platform/integration smok
       "Test TypeScript compile",
       "Architecture dependency test",
       "Unit tests",
+      "Configuration bundle schema and exclusion scan",
       "Security test gate",
       "Build all workspaces",
       "Explicit console production build",

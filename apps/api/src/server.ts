@@ -16,6 +16,7 @@ import { DynamoPersistence } from "@pirh/persistence";
 import { LocalDynamoDbSecretStore } from "@pirh/secrets";
 import { SafePartnerHttpClient } from "@pirh/partner-http";
 import { executeTransformation } from "@pirh/transformation";
+import { ConfigurationPortabilityService } from "@pirh/config-portability";
 import { createTelemetryRuntime } from "@pirh/observability";
 
 const port = Number.parseInt(process.env.API_PORT ?? "3000", 10);
@@ -49,9 +50,11 @@ const requiredConfiguration: HealthProbe = async () => ({
   ok: Boolean(
     process.env.APP_ENV &&
       process.env.DYNAMODB_ENDPOINT &&
-      process.env.ELASTICMQ_ENDPOINT,
+      process.env.ELASTICMQ_ENDPOINT &&
+      process.env.PORTABILITY_PLAN_SIGNING_KEY_B64,
   ),
-  detail: "APP_ENV, DYNAMODB_ENDPOINT, and ELASTICMQ_ENDPOINT are required",
+  detail:
+    "APP_ENV, DYNAMODB_ENDPOINT, ELASTICMQ_ENDPOINT, and PORTABILITY_PLAN_SIGNING_KEY_B64 are required",
 });
 const documentClient = DynamoDBDocumentClient.from(
   new DynamoDBClient({
@@ -110,6 +113,15 @@ const service = new ControlPlaneService({
   ids: { next: (prefix) => id(prefix) },
   clock: { now: () => new Date() },
 });
+const portability = new ConfigurationPortabilityService({
+  repository: persistence,
+  service,
+  secrets,
+  audit: persistence,
+  ids: { next: (prefix) => id(prefix) },
+  sourceEnvironment: process.env.APP_ENV ?? "local",
+  planSigningKeyBase64: process.env.PORTABILITY_PLAN_SIGNING_KEY_B64 ?? "",
+});
 const consoleAuthenticator = new ConsoleAuthenticator(
   new OidcAccessTokenVerifier({
     issuer: process.env.OIDC_ISSUER ?? "http://keycloak:8080/realms/pirh-local",
@@ -151,6 +163,7 @@ const app = await buildApi({
       process.env.LOCAL_CURSOR_SECRET ??
       "local-cursor-secret-not-for-production",
   },
+  portability: { service: portability },
   eventIngestion: {
     service: new EventIngestionService({
       writer: persistence,

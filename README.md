@@ -98,6 +98,31 @@ an eligible terminal delivery with a 10–1000 character reason. The original de
 remains immutable. `pnpm local:verify` supplies its own isolated environment values
 when it runs the same demonstration.
 
+## Controlled configuration portability (M09)
+
+Configuration bundles promote only approved control-plane intent. They are versioned,
+deterministic YAML documents (JSON is accepted on import) and never carry secret
+values, events, attempts, audit history, queue work, leases, or circuit/rate runtime
+state. Target environments must provision the logical secret aliases before enabling
+their destinations.
+
+Set `PIRH_ACCESS_TOKEN` to a tenant-scoped admin access token and, when needed,
+`PIRH_API_BASE_URL`. The plan key in `.env.local` must be a distinct base64-encoded
+32-byte value.
+
+```bash
+pnpm config export --tenant tenant-demo --output ./config/demo.yaml
+pnpm config import ./config/demo.yaml --validate
+pnpm config import ./config/demo.yaml --plan
+pnpm config import ./config/demo.yaml --apply
+```
+
+Planning writes the short-lived signed receipt to `demo.yaml.pirh-plan.json`, which
+is intentionally ignored by Git. Apply verifies that receipt and target state before
+mutating anything, then refreshes it with the resulting plan. Omitted resources are
+not deleted or disabled; unresolved aliases and immutable-version changes are
+reported rather than forced.
+
 ## Repository boundaries
 
 - `apps/` contains runtime composition points only.

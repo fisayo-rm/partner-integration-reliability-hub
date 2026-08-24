@@ -40,6 +40,8 @@ export interface TenantContext {
 
 export interface Tenant {
   readonly tenantId: TenantId;
+  /** Stable logical identity used by configuration portability. */
+  readonly externalKey: ExternalKey;
   readonly name: string;
   readonly status: "active" | "disabled";
   readonly createdAt: IsoInstant;
@@ -209,6 +211,8 @@ export interface Subscription {
   readonly eventType: string;
   readonly enabled: boolean;
   readonly createdAt: IsoInstant;
+  /** Mutable control-plane records participate in optimistic concurrency. */
+  readonly version: number;
 }
 
 export type DeliveryState =

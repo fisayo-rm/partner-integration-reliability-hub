@@ -147,4 +147,18 @@ export class LocalDynamoDbSecretStore implements SecretStore {
       throw new Error("Secret reference could not be resolved.");
     }
   }
+  public async isBound(
+    context: TenantContext,
+    alias: string,
+  ): Promise<boolean> {
+    const response = await this.client.send(
+      new GetCommand({
+        TableName: this.config.coreTableName,
+        Key: secretHeadKey(context, alias),
+        ProjectionExpression: "#version",
+        ExpressionAttributeNames: { "#version": "version" },
+      }),
+    );
+    return typeof response.Item?.version === "string";
+  }
 }

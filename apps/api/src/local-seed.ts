@@ -11,6 +11,8 @@ const tenantId =
   "tenant_01J0A1B2C3D4E5F6G7H8J9K0MN" as TenantContext["tenantId"];
 const otherTenantId =
   "tenant_01J0A1B2C3D4E5F6G7H8J9K0MO" as TenantContext["tenantId"];
+const targetTenantId =
+  "tenant_01J0A1B2C3D4E5F6G7H8J9K0MP" as TenantContext["tenantId"];
 const clientId = "cli_01J0A1B2C3D4E5F6G7H8J9K0MN" as ClientId;
 const issuer =
   process.env.OIDC_ISSUER ?? "http://localhost:8080/realms/pirh-local";
@@ -21,11 +23,15 @@ const masterKey = process.env.LOCAL_SECRET_MASTER_KEY_B64;
 const producerSecret = process.env.LOCAL_SEED_PRODUCER_SECRET;
 const alphaKey = process.env.LOCAL_SEED_ALPHA_API_KEY;
 const betaSecret = process.env.LOCAL_SEED_BETA_CLIENT_SECRET;
+const targetAlphaKey = process.env.LOCAL_SEED_TARGET_ALPHA_API_KEY;
+const targetBetaSecret = process.env.LOCAL_SEED_TARGET_BETA_CLIENT_SECRET;
 if (
   masterKey === undefined ||
   producerSecret === undefined ||
   alphaKey === undefined ||
-  betaSecret === undefined
+  betaSecret === undefined ||
+  targetAlphaKey === undefined ||
+  targetBetaSecret === undefined
 )
   throw new Error("Local secret seed configuration is required.");
 const documentClient = DynamoDBDocumentClient.from(
@@ -73,6 +79,12 @@ const identities: readonly (readonly [
     "other-tenant-viewer",
     otherTenantId,
   ],
+  [
+    "55555555-5555-4555-8555-555555555555",
+    "admin",
+    "local-target-admin",
+    targetTenantId,
+  ],
 ];
 try {
   await store.resolve(seedContext, reference);
@@ -89,6 +101,7 @@ await persistence.putSeed([
     ...key.tenant(tenantId),
     entityType: "TENANT",
     tenantId,
+    externalKey: "tenant-demo",
     name: "Local demo tenant",
     status: "active",
     createdAt: now,
@@ -117,7 +130,18 @@ await persistence.putSeed([
     ...key.tenant(otherTenantId),
     entityType: "TENANT",
     tenantId: otherTenantId,
+    externalKey: "tenant-other",
     name: "Other local demo tenant",
+    status: "active",
+    createdAt: now,
+    version: 1,
+  },
+  {
+    ...key.tenant(targetTenantId),
+    entityType: "TENANT",
+    tenantId: targetTenantId,
+    externalKey: "tenant-demo",
+    name: "Local M09 target tenant",
     status: "active",
     createdAt: now,
     version: 1,
@@ -133,6 +157,18 @@ await persistence.putSeed([
     userId,
   })),
 ]);
+for (const [name, value] of [
+  ["alpha-api-key", targetAlphaKey],
+  ["beta-client-secret", targetBetaSecret],
+] as const) {
+  const targetContext: TenantContext = {
+    ...seedContext,
+    tenantId: targetTenantId,
+    actorId: "local-target-seeder",
+  };
+  if (!(await store.isBound(targetContext, name)))
+    await store.store(targetContext, { name, version: "target-v1", value });
+}
 const alphaPartnerId = "ptr_01J0A1B2C3D4E5F6G7H8J90001" as never;
 if ((await persistence.getPartner(seedContext, alphaPartnerId)) === undefined) {
   let sequence = 0;

@@ -1,5 +1,6 @@
 import { createHash, createHmac, randomUUID } from "node:crypto";
 import { Buffer } from "node:buffer";
+import { URL, URLSearchParams } from "node:url";
 import {
   InitiateAuthCommand,
   CognitoIdentityProviderClient,
@@ -10,7 +11,8 @@ import { chromium } from "@playwright/test";
 const apiBase = process.env.HOSTED_API_URL;
 const consoleOrigin = process.env.HOSTED_CONSOLE_ORIGIN;
 const clientId = process.env.COGNITO_CLIENT_ID;
-const hostedLoginAuthority = process.env.VITE_OIDC_AUTHORITY;
+const issuer = process.env.OIDC_ISSUER;
+const hostedLoginAuthority = process.env.VITE_OIDC_HOSTED_LOGIN_AUTHORITY;
 const adminPassword = process.env.DEMO_ADMIN_PASSWORD;
 const alphaUrl = process.env.HOSTED_MOCK_ALPHA_URL;
 const betaUrl = process.env.HOSTED_MOCK_BETA_URL;
@@ -18,6 +20,7 @@ if (
   apiBase === undefined ||
   consoleOrigin === undefined ||
   clientId === undefined ||
+  issuer === undefined ||
   hostedLoginAuthority === undefined ||
   adminPassword === undefined ||
   alphaUrl === undefined ||
@@ -37,6 +40,30 @@ const consoleResponse = await fetch(consoleOrigin, {
 if (!consoleResponse.ok)
   throw new Error(
     `Hosted console reachability failed with ${consoleResponse.status}.`,
+  );
+const hostedAuthorize = new URL(
+  `${hostedLoginAuthority.replace(/\/$/, "")}/oauth2/authorize`,
+);
+hostedAuthorize.search = new URLSearchParams({
+  client_id: clientId,
+  response_type: "code",
+  scope: "openid profile email",
+  redirect_uri: `${consoleOrigin.replace(/\/$/, "")}/auth/callback`,
+  state: randomUUID(),
+  nonce: randomUUID(),
+}).toString();
+const hostedLogin = await fetch(hostedAuthorize, {
+  redirect: "manual",
+  signal: AbortSignal.timeout(10_000),
+});
+const hostedLoginLocation = hostedLogin.headers.get("location") ?? "";
+if (
+  !hostedLogin.ok &&
+  (hostedLogin.status !== 302 ||
+    !hostedLoginLocation.startsWith(`${hostedLoginAuthority}/login`))
+)
+  throw new Error(
+    `Hosted Cognito authorization endpoint failed with ${hostedLogin.status}.`,
   );
 const region = process.env.AWS_REGION ?? "us-east-1";
 const ssm = new SSMClient({ region });
@@ -175,7 +202,7 @@ try {
         }),
       );
     },
-    { authority: hostedLoginAuthority, audience: clientId, token: accessToken },
+    { authority: issuer, audience: clientId, token: accessToken },
   );
   await page.goto(
     `${consoleOrigin.replace(/\/$/, "")}/events/${acceptance.eventId}`,

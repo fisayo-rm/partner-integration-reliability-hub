@@ -50,7 +50,8 @@ jobs:
           {
             echo "COGNITO_USER_POOL_ID=$(stack_output PirhDemoIdentity CognitoUserPoolId)"
             echo "OIDC_ISSUER=$(stack_output PirhDemoIdentity CognitoIssuer)"
-            echo "VITE_OIDC_AUTHORITY=$(stack_output PirhDemoIdentity CognitoHostedLoginAuthority)"
+            echo "VITE_OIDC_AUTHORITY=$(stack_output PirhDemoIdentity CognitoIssuer)"
+            echo "VITE_OIDC_HOSTED_LOGIN_AUTHORITY=$(stack_output PirhDemoIdentity CognitoHostedLoginAuthority)"
             echo "VITE_OIDC_CLIENT_ID=$(stack_output PirhDemoIdentity CognitoClientId)"
             echo "COGNITO_CLIENT_ID=$(stack_output PirhDemoIdentity CognitoClientId)"
             echo "CORE_TABLE_NAME=$(stack_output PirhDemoData CoreTableName)"
@@ -77,6 +78,7 @@ jobs:
         env:
           VITE_API_BASE_URL: ${{ env.VITE_API_BASE_URL }}
           VITE_OIDC_AUTHORITY: ${{ env.VITE_OIDC_AUTHORITY }}
+          VITE_OIDC_HOSTED_LOGIN_AUTHORITY: ${{ env.VITE_OIDC_HOSTED_LOGIN_AUTHORITY }}
           VITE_OIDC_CLIENT_ID: ${{ env.VITE_OIDC_CLIENT_ID }}
         run: pnpm --filter @pirh/console build
       - name: Deploy Cloudflare Pages static artifact
@@ -90,6 +92,7 @@ jobs:
           HOSTED_CONSOLE_ORIGIN: ${{ env.HOSTED_CONSOLE_ORIGIN }}
           OIDC_ISSUER: ${{ env.OIDC_ISSUER }}
           VITE_OIDC_AUTHORITY: ${{ env.VITE_OIDC_AUTHORITY }}
+          VITE_OIDC_HOSTED_LOGIN_AUTHORITY: ${{ env.VITE_OIDC_HOSTED_LOGIN_AUTHORITY }}
           COGNITO_CLIENT_ID: ${{ env.COGNITO_CLIENT_ID }}
           HOSTED_MOCK_ALPHA_URL: ${{ env.HOSTED_MOCK_ALPHA_URL }}
           HOSTED_MOCK_BETA_URL: ${{ env.HOSTED_MOCK_BETA_URL }}

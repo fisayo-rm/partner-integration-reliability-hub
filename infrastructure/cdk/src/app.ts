@@ -369,6 +369,12 @@ class ApiStack extends PirhStack {
             : [apigwv2.HttpMethod.GET],
         integration,
       });
+    const protectedHttpMethods = [
+      apigwv2.HttpMethod.GET,
+      apigwv2.HttpMethod.POST,
+      apigwv2.HttpMethod.PATCH,
+      apigwv2.HttpMethod.DELETE,
+    ];
     for (const path of [
       "/api/v1/session",
       "/api/v1/deliveries",
@@ -382,7 +388,7 @@ class ApiStack extends PirhStack {
     ])
       this.httpApi.addRoutes({
         path,
-        methods: [apigwv2.HttpMethod.ANY],
+        methods: protectedHttpMethods,
         integration,
         authorizer: jwt,
       });

@@ -134,6 +134,9 @@ const config = {
   authority:
     import.meta.env.VITE_OIDC_AUTHORITY ??
     "http://localhost:8080/realms/pirh-local",
+  hostedLoginAuthority:
+    import.meta.env.VITE_OIDC_HOSTED_LOGIN_AUTHORITY ??
+    "http://localhost:8080/realms/pirh-local",
   clientId: import.meta.env.VITE_OIDC_CLIENT_ID ?? "pirh-console",
 };
 
@@ -144,6 +147,14 @@ const manager = new UserManager({
   post_logout_redirect_uri: `${window.location.origin}/login`,
   response_type: "code",
   scope: "openid profile email",
+  metadata: {
+    issuer: config.authority,
+    authorization_endpoint: `${config.hostedLoginAuthority}/oauth2/authorize`,
+    token_endpoint: `${config.hostedLoginAuthority}/oauth2/token`,
+    userinfo_endpoint: `${config.hostedLoginAuthority}/oauth2/userInfo`,
+    end_session_endpoint: `${config.hostedLoginAuthority}/logout`,
+    jwks_uri: `${config.authority}/.well-known/jwks.json`,
+  },
   userStore: new WebStorageStateStore({ store: window.sessionStorage }),
   stateStore: new WebStorageStateStore({ store: window.sessionStorage }),
   // Keycloak includes a refresh token in this Authorization Code with PKCE flow.

@@ -109,7 +109,7 @@ class IdentityStack extends PirhStack {
       value: this.userPoolClient.userPoolClientId,
     });
     new CfnOutput(this, "CognitoHostedLoginAuthority", {
-      value: `https://${hostedLoginDomain.domainName}`,
+      value: hostedLoginDomain.baseUrl(),
     });
     new CfnOutput(this, "CognitoUserPoolId", {
       value: this.userPool.userPoolId,

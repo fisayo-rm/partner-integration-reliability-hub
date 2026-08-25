@@ -9,5 +9,7 @@ test("demo identity stack provisions a managed Cognito hosted-login domain", asy
   expect(source).toContain('this.userPool.addDomain("HostedLoginDomain"');
   expect(source).toContain('domainPrefix: "pirh-demo-auth"');
   expect(source).toContain("hostedLoginDomain.baseUrl()");
+  expect(source).toContain("CfnManagedLoginBranding");
+  expect(source).toContain("useCognitoProvidedValues: true");
   expect(source).toContain("CognitoHostedLoginAuthority");
 });

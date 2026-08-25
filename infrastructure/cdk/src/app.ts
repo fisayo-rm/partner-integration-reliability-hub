@@ -102,6 +102,11 @@ class IdentityStack extends PirhStack {
       cognitoDomain: { domainPrefix: "pirh-demo-auth" },
       managedLoginVersion: cognito.ManagedLoginVersion.NEWER_MANAGED_LOGIN,
     });
+    new cognito.CfnManagedLoginBranding(this, "ConsoleManagedLoginBranding", {
+      clientId: this.userPoolClient.userPoolClientId,
+      userPoolId: this.userPool.userPoolId,
+      useCognitoProvidedValues: true,
+    });
     new CfnOutput(this, "CognitoIssuer", {
       value: this.userPool.userPoolProviderUrl,
     });

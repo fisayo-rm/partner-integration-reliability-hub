@@ -65,6 +65,14 @@ if (
   throw new Error(
     `Hosted Cognito authorization endpoint failed with ${hostedLogin.status}.`,
   );
+const hostedLoginPage = await fetch(hostedLoginLocation, {
+  redirect: "manual",
+  signal: AbortSignal.timeout(10_000),
+});
+if (!hostedLoginPage.ok)
+  throw new Error(
+    `Hosted Cognito login page failed with ${hostedLoginPage.status}.`,
+  );
 const region = process.env.AWS_REGION ?? "us-east-1";
 const ssm = new SSMClient({ region });
 const parameter = async (name) => {

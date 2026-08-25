@@ -50,7 +50,7 @@ jobs:
           {
             echo "COGNITO_USER_POOL_ID=$(stack_output PirhDemoIdentity CognitoUserPoolId)"
             echo "OIDC_ISSUER=$(stack_output PirhDemoIdentity CognitoIssuer)"
-            echo "VITE_OIDC_AUTHORITY=$(stack_output PirhDemoIdentity CognitoIssuer)"
+            echo "VITE_OIDC_AUTHORITY=$(stack_output PirhDemoIdentity CognitoHostedLoginAuthority)"
             echo "VITE_OIDC_CLIENT_ID=$(stack_output PirhDemoIdentity CognitoClientId)"
             echo "COGNITO_CLIENT_ID=$(stack_output PirhDemoIdentity CognitoClientId)"
             echo "CORE_TABLE_NAME=$(stack_output PirhDemoData CoreTableName)"
@@ -89,6 +89,7 @@ jobs:
           HOSTED_API_URL: ${{ env.HOSTED_API_URL }}
           HOSTED_CONSOLE_ORIGIN: ${{ env.HOSTED_CONSOLE_ORIGIN }}
           OIDC_ISSUER: ${{ env.OIDC_ISSUER }}
+          VITE_OIDC_AUTHORITY: ${{ env.VITE_OIDC_AUTHORITY }}
           COGNITO_CLIENT_ID: ${{ env.COGNITO_CLIENT_ID }}
           HOSTED_MOCK_ALPHA_URL: ${{ env.HOSTED_MOCK_ALPHA_URL }}
           HOSTED_MOCK_BETA_URL: ${{ env.HOSTED_MOCK_BETA_URL }}

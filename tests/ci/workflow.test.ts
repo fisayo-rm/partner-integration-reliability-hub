@@ -92,6 +92,7 @@ test("deployment uses protected OIDC and has a rollback entrypoint", async () =>
   expect(JSON.stringify(deploy)).toContain("DEMO_ADMIN_PASSWORD");
   expect(JSON.stringify(deploy)).toContain("HOSTED_MOCK_ALPHA_URL");
   expect(JSON.stringify(deploy)).toContain("OIDC_ISSUER");
+  expect(JSON.stringify(deploy)).toContain("VITE_OIDC_AUTHORITY");
   expect(JSON.stringify(deploy)).toContain("pirh-demo-deployment-");
   expect(
     deploy.jobs.deploy.steps.find(

@@ -11,7 +11,6 @@ import { chromium } from "@playwright/test";
 const apiBase = process.env.HOSTED_API_URL;
 const consoleOrigin = process.env.HOSTED_CONSOLE_ORIGIN;
 const clientId = process.env.COGNITO_CLIENT_ID;
-const issuer = process.env.OIDC_ISSUER;
 const hostedLoginAuthority = process.env.VITE_OIDC_HOSTED_LOGIN_AUTHORITY;
 const adminPassword = process.env.DEMO_ADMIN_PASSWORD;
 const alphaUrl = process.env.HOSTED_MOCK_ALPHA_URL;
@@ -20,7 +19,6 @@ if (
   apiBase === undefined ||
   consoleOrigin === undefined ||
   clientId === undefined ||
-  issuer === undefined ||
   hostedLoginAuthority === undefined ||
   adminPassword === undefined ||
   alphaUrl === undefined ||
@@ -198,19 +196,19 @@ if (!containsEvent(alpha) || !containsEvent(beta))
 const browser = await chromium.launch({ headless: true });
 try {
   const page = await browser.newPage();
-  await page.addInitScript(
-    ({ authority, audience, token }) => {
-      globalThis.sessionStorage.setItem(
-        `oidc.user:${authority}:${audience}`,
-        JSON.stringify({
-          access_token: token,
-          token_type: "Bearer",
-          profile: { sub: "hosted-smoke", "cognito:groups": ["admin"] },
-          expires_at: Math.floor(Date.now() / 1_000) + 300,
-        }),
-      );
-    },
-    { authority: issuer, audience: clientId, token: accessToken },
+  await page.goto(`${consoleOrigin.replace(/\/$/, "")}/login`, {
+    waitUntil: "networkidle",
+    timeout: 20_000,
+  });
+  await page.getByRole("button", { name: "Sign in", exact: true }).click();
+  await page.locator('input[name="username"]').fill("admin@pirh.demo");
+  await page.locator('input[name="password"]').fill(adminPassword);
+  await page.locator("form#primary-form button[type=submit]").click();
+  await page.waitForURL(
+    (url) =>
+      url.origin === consoleOrigin.replace(/\/$/, "") &&
+      url.pathname === "/overview",
+    { timeout: 30_000 },
   );
   await page.goto(
     `${consoleOrigin.replace(/\/$/, "")}/events/${acceptance.eventId}`,

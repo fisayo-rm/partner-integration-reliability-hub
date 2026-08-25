@@ -27,6 +27,23 @@ jobs:
         with:
           role-to-assume: ${{ vars.AWS_DEPLOY_ROLE_ARN }}
           aws-region: us-east-1
+      - name: Resolve current hosted smoke endpoints
+        run: |
+          stack_output() {
+            aws cloudformation describe-stacks --stack-name "$1" --query "Stacks[0].Outputs[?OutputKey=='$2'].OutputValue" --output text
+          }
+          {
+            echo "OIDC_ISSUER=$(stack_output PirhDemoIdentity CognitoIssuer)"
+            echo "VITE_OIDC_AUTHORITY=$(stack_output PirhDemoIdentity CognitoIssuer)"
+            echo "VITE_OIDC_HOSTED_LOGIN_AUTHORITY=$(stack_output PirhDemoIdentity CognitoHostedLoginAuthority)"
+            echo "COGNITO_CLIENT_ID=$(stack_output PirhDemoIdentity CognitoClientId)"
+            echo "HOSTED_API_URL=$(stack_output PirhDemoApi ApiUrl)"
+            echo "HOSTED_MOCK_ALPHA_URL=$(stack_output PirhDemoMockPartners MockAlphaUrl)"
+            echo "HOSTED_MOCK_BETA_URL=$(stack_output PirhDemoMockPartners MockBetaUrl)"
+            echo "HOSTED_CONSOLE_ORIGIN=https://${{ vars.CLOUDFLARE_PAGES_PROJECT }}.pages.dev"
+          } >> "$GITHUB_ENV"
+      - name: Install Playwright Chromium
+        run: pnpm exec playwright install --with-deps chromium
       - name: Download the selected immutable deployment artifact
         env:
           GH_TOKEN: ${{ github.token }}
@@ -37,3 +54,15 @@ jobs:
           CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
           CLOUDFLARE_PAGES_PROJECT: ${{ vars.CLOUDFLARE_PAGES_PROJECT }}
         run: node scripts/rollback-demo.mjs .rollback-artifact/deployment.json .rollback-artifact/console
+      - name: Hosted recovery smoke
+        env:
+          HOSTED_API_URL: ${{ env.HOSTED_API_URL }}
+          HOSTED_CONSOLE_ORIGIN: ${{ env.HOSTED_CONSOLE_ORIGIN }}
+          OIDC_ISSUER: ${{ env.OIDC_ISSUER }}
+          VITE_OIDC_AUTHORITY: ${{ env.VITE_OIDC_AUTHORITY }}
+          VITE_OIDC_HOSTED_LOGIN_AUTHORITY: ${{ env.VITE_OIDC_HOSTED_LOGIN_AUTHORITY }}
+          COGNITO_CLIENT_ID: ${{ env.COGNITO_CLIENT_ID }}
+          HOSTED_MOCK_ALPHA_URL: ${{ env.HOSTED_MOCK_ALPHA_URL }}
+          HOSTED_MOCK_BETA_URL: ${{ env.HOSTED_MOCK_BETA_URL }}
+          DEMO_ADMIN_PASSWORD: ${{ secrets.DEMO_ADMIN_PASSWORD }}
+        run: pnpm smoke:hosted

@@ -7,6 +7,7 @@ test("console uses Cognito's issuer for validation and hosted domain for OAuth",
     "utf8",
   );
   expect(source).toContain("VITE_OIDC_HOSTED_LOGIN_AUTHORITY");
+  expect(source).toContain("config.hostedLoginAuthority === undefined");
   expect(source).toContain("authorization_endpoint");
   expect(source).toContain("/oauth2/authorize");
   expect(source).toContain("jwks_uri");

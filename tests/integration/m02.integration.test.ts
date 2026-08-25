@@ -465,7 +465,16 @@ test("M03 local seed provides two tenant-scoped partner configurations and alias
 });
 
 test("M06 replay is race-safe, immutable, searchable, audited, and rolled up", async () => {
-  const now = "2026-08-18T08:00:00.000Z" as never;
+  const now = new Date().toISOString() as never;
+  const dayStart = new Date(now);
+  dayStart.setUTCHours(0, 0, 0, 0);
+  const nextDay = new Date(dayStart);
+  nextDay.setUTCDate(nextDay.getUTCDate() + 1);
+  const hourStart = new Date(now);
+  hourStart.setUTCMinutes(0, 0, 0);
+  const expiresAt = new Date(
+    new Date(now).getTime() + 31 * 86_400_000,
+  ).toISOString() as never;
   const eventId =
     `evt_21J0A1B2C3D4E5F6G7H8${suffix.slice(0, 6).toUpperCase()}` as never;
   const deliveryId =
@@ -499,7 +508,7 @@ test("M06 replay is race-safe, immutable, searchable, audited, and rolled up", a
       deadLetteredDeliveries: 0,
     },
     version: 3,
-    expiresAt: "2026-09-18T08:00:00.000Z" as never,
+    expiresAt,
   };
   const destination: Destination = {
     destinationId,
@@ -674,8 +683,8 @@ test("M06 replay is race-safe, immutable, searchable, audited, and rolled up", a
   await expect(
     persistence.searchDeliveries(operator, {
       limit: 10,
-      from: "2026-08-18T00:00:00.000Z",
-      to: "2026-08-19T00:00:00.000Z",
+      from: dayStart.toISOString(),
+      to: nextDay.toISOString(),
       correlationId: event.correlationId,
     }),
   ).resolves.toMatchObject({
@@ -684,8 +693,8 @@ test("M06 replay is race-safe, immutable, searchable, audited, and rolled up", a
   await expect(
     persistence.listAudit(operator, {
       limit: 10,
-      from: "2026-08-18T00:00:00.000Z",
-      to: "2026-08-19T00:00:00.000Z",
+      from: dayStart.toISOString(),
+      to: nextDay.toISOString(),
       status: "delivery.replay_requested",
     }),
   ).resolves.toMatchObject({
@@ -693,8 +702,8 @@ test("M06 replay is race-safe, immutable, searchable, audited, and rolled up", a
   });
   await expect(
     persistence.getRollups(operator, {
-      from: "2026-08-18T08:00:00.000Z",
-      to: "2026-08-18T08:00:00.000Z",
+      from: hourStart.toISOString(),
+      to: hourStart.toISOString(),
     }),
   ).resolves.toEqual(
     expect.arrayContaining([expect.objectContaining({ replaysRequested: 1 })]),

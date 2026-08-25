@@ -92,7 +92,9 @@ class IdentityStack extends PirhStack {
         ],
         logoutUrls: [
           "https://partner-integration-reliability-hub-demo.pages.dev/",
+          "https://partner-integration-reliability-hub-demo.pages.dev/login",
           "http://localhost:5173/",
+          "http://localhost:5173/login",
         ],
       },
       preventUserExistenceErrors: true,
@@ -373,26 +375,83 @@ class ApiStack extends PirhStack {
             : [apigwv2.HttpMethod.GET],
         integration,
       });
-    const protectedHttpMethods = [
-      apigwv2.HttpMethod.GET,
-      apigwv2.HttpMethod.POST,
-      apigwv2.HttpMethod.PATCH,
-      apigwv2.HttpMethod.DELETE,
+    const protectedHttpRoutes = [
+      { path: "/api/v1/session", methods: [apigwv2.HttpMethod.GET] },
+      { path: "/api/v1/events", methods: [apigwv2.HttpMethod.GET] },
+      { path: "/api/v1/deliveries", methods: [apigwv2.HttpMethod.GET] },
+      {
+        path: "/api/v1/deliveries/{deliveryId}",
+        methods: [apigwv2.HttpMethod.GET],
+      },
+      {
+        path: "/api/v1/deliveries/{deliveryId}/replays",
+        methods: [apigwv2.HttpMethod.POST],
+      },
+      { path: "/api/v1/audit-logs", methods: [apigwv2.HttpMethod.GET] },
+      {
+        path: "/api/v1/operational-rollups",
+        methods: [apigwv2.HttpMethod.GET],
+      },
+      {
+        path: "/api/v1/partners",
+        methods: [apigwv2.HttpMethod.GET, apigwv2.HttpMethod.POST],
+      },
+      {
+        path: "/api/v1/partners/{partnerId}",
+        methods: [apigwv2.HttpMethod.GET, apigwv2.HttpMethod.PATCH],
+      },
+      {
+        path: "/api/v1/partners/{partnerId}/destinations",
+        methods: [apigwv2.HttpMethod.POST],
+      },
+      {
+        path: "/api/v1/destinations",
+        methods: [apigwv2.HttpMethod.GET],
+      },
+      {
+        path: "/api/v1/destinations/{destinationId}",
+        methods: [apigwv2.HttpMethod.GET, apigwv2.HttpMethod.PATCH],
+      },
+      {
+        path: "/api/v1/transformations",
+        methods: [apigwv2.HttpMethod.GET, apigwv2.HttpMethod.POST],
+      },
+      {
+        path: "/api/v1/transformations/{transformationId}/versions",
+        methods: [apigwv2.HttpMethod.GET, apigwv2.HttpMethod.POST],
+      },
+      {
+        path: "/api/v1/transformations/validate",
+        methods: [apigwv2.HttpMethod.POST],
+      },
+      {
+        path: "/api/v1/subscriptions",
+        methods: [apigwv2.HttpMethod.GET, apigwv2.HttpMethod.POST],
+      },
+      {
+        path: "/api/v1/subscriptions/{subscriptionId}",
+        methods: [apigwv2.HttpMethod.DELETE],
+      },
+      {
+        path: "/api/v1/configuration/exports",
+        methods: [apigwv2.HttpMethod.POST],
+      },
+      {
+        path: "/api/v1/configuration/imports/validate",
+        methods: [apigwv2.HttpMethod.POST],
+      },
+      {
+        path: "/api/v1/configuration/imports/plan",
+        methods: [apigwv2.HttpMethod.POST],
+      },
+      {
+        path: "/api/v1/configuration/imports/apply",
+        methods: [apigwv2.HttpMethod.POST],
+      },
     ];
-    for (const path of [
-      "/api/v1/session",
-      "/api/v1/deliveries",
-      "/api/v1/audit-logs",
-      "/api/v1/operational-rollups",
-      "/api/v1/partners",
-      "/api/v1/destinations",
-      "/api/v1/subscriptions",
-      "/api/v1/transformations",
-      "/api/v1/configuration-plans",
-    ])
+    for (const route of protectedHttpRoutes)
       this.httpApi.addRoutes({
-        path,
-        methods: protectedHttpMethods,
+        ...route,
         integration,
         authorizer: jwt,
       });

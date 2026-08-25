@@ -11,6 +11,19 @@ test("console uses Cognito's issuer for validation and hosted domain for OAuth",
   expect(source).toContain("authorization_endpoint");
   expect(source).toContain("/oauth2/authorize");
   expect(source).toContain("jwks_uri");
+  expect(source).toContain('url.searchParams.set("logout_uri"');
+  expect(source).toContain("await manager.removeUser()");
+});
+
+test("Cognito allows the console logout destination", async () => {
+  const source = await readFile(
+    new URL("../../infrastructure/cdk/src/app.ts", import.meta.url),
+    "utf8",
+  );
+
+  expect(source).toContain(
+    '"https://partner-integration-reliability-hub-demo.pages.dev/login"',
+  );
 });
 
 test("hosted smoke signs in through Cognito instead of forging browser storage", async () => {

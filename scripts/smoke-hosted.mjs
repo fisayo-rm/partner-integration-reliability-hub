@@ -210,6 +210,9 @@ try {
       url.pathname === "/overview",
     { timeout: 30_000 },
   );
+  await page.getByRole("heading", { name: "Overview" }).waitFor({
+    timeout: 30_000,
+  });
   await page.goto(
     `${consoleOrigin.replace(/\/$/, "")}/events/${acceptance.eventId}`,
     {

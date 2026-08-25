@@ -347,6 +347,10 @@ class ApiStack extends PirhStack {
     const integration = new integrations.HttpLambdaIntegration(
       "ApiLiveIntegration",
       api.alias,
+      // One API-scoped permission avoids exhausting the 20 KiB Lambda resource
+      // policy limit when the same live alias serves the explicit protected
+      // method routes below. The permission remains restricted to this API.
+      { scopePermissionToRoute: false },
     );
     const jwt = new authorizers.HttpJwtAuthorizer(
       "ConsoleJwt",

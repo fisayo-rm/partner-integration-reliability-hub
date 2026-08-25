@@ -12,3 +12,14 @@ test("console uses Cognito's issuer for validation and hosted domain for OAuth",
   expect(source).toContain("/oauth2/authorize");
   expect(source).toContain("jwks_uri");
 });
+
+test("hosted smoke signs in through Cognito instead of forging browser storage", async () => {
+  const source = await readFile(
+    new URL("../../scripts/smoke-hosted.mjs", import.meta.url),
+    "utf8",
+  );
+  expect(source).toContain('input[name="username"]');
+  expect(source).toContain('input[name="password"]');
+  expect(source).toContain("form#primary-form button[type=submit]");
+  expect(source).not.toContain("addInitScript");
+});

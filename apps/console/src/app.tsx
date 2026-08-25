@@ -167,6 +167,16 @@ const manager = new UserManager({
   monitorSession: false,
 });
 
+function hostedLogoutUrl(): string | undefined {
+  if (config.hostedLoginAuthority === undefined) return undefined;
+  const url = new URL(
+    `${config.hostedLoginAuthority.replace(/\/$/, "")}/logout`,
+  );
+  url.searchParams.set("client_id", config.clientId);
+  url.searchParams.set("logout_uri", `${window.location.origin}/login`);
+  return url.toString();
+}
+
 class ApiRequestError extends Error {
   public constructor(
     readonly status: number,
@@ -312,7 +322,12 @@ function AuthProvider({ children }: { readonly children: ReactNode }) {
       session,
       ready,
       signIn: () => manager.signinRedirect({ prompt: "login" }),
-      signOut: () => manager.signoutRedirect(),
+      signOut: async () => {
+        const logoutUrl = hostedLogoutUrl();
+        if (logoutUrl === undefined) return manager.signoutRedirect();
+        await manager.removeUser();
+        window.location.assign(logoutUrl);
+      },
     }),
     [ready, session, user?.access_token],
   );

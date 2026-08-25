@@ -107,7 +107,7 @@ Resources:
               - Sid: RollbackDemoAliases
                 Effect: Allow
                 Action: lambda:UpdateAlias
-                Resource: !Sub arn:${AWS::Partition}:lambda:${AWS::Region}:${AWS::AccountId}:function:PirhDemo*:*
+                Resource: !Sub arn:${AWS::Partition}:lambda:${AWS::Region}:${AWS::AccountId}:function:PirhDemo*
               - Sid: DiscoverDemoAliases
                 Effect: Allow
                 Action: lambda:ListAliases

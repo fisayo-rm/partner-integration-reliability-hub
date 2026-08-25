@@ -134,9 +134,11 @@ test("deployment uses protected OIDC and has a rollback entrypoint", async () =>
   expect(rollback.permissions.actions).toBe("read");
   expect(JSON.stringify(rollback)).toContain("gh run download");
   expect(JSON.stringify(rollback)).toContain("CLOUDFLARE_API_TOKEN");
+  expect(JSON.stringify(rollback)).toContain("Hosted recovery smoke");
+  expect(JSON.stringify(rollback)).toContain("pnpm smoke:hosted");
 });
 
-test("GitHub deployment role can record only demo Lambda aliases", async () => {
+test("GitHub deployment role can discover and restore only demo Lambda aliases", async () => {
   const bootstrap = await readFile(
     new URL(
       "../../infrastructure/bootstrap/github-oidc-demo.yaml",
@@ -147,5 +149,8 @@ test("GitHub deployment role can record only demo Lambda aliases", async () => {
 
   expect(bootstrap).toContain("Sid: DiscoverDemoAliases");
   expect(bootstrap).toContain("Action: lambda:ListAliases");
+  expect(bootstrap).toContain("Sid: RollbackDemoAliases");
+  expect(bootstrap).toContain("Action: lambda:UpdateAlias");
+  expect(bootstrap).not.toContain("function:PirhDemo*:*");
   expect(bootstrap).toContain("function:PirhDemo*");
 });

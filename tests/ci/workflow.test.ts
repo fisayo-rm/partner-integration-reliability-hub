@@ -97,6 +97,24 @@ test("deployment uses protected OIDC and has a rollback entrypoint", async () =>
   expect(JSON.stringify(deploy)).toContain("pirh-demo-deployment-");
   expect(
     deploy.jobs.deploy.steps.find(
+      (step: { name?: string }) =>
+        step.name === "Prepare immutable rollback artifact",
+    ).env.DEPLOYMENT_METADATA_FILE,
+  ).toBe("deployment-artifact/deployment.json");
+  expect(
+    deploy.jobs.deploy.steps.find(
+      (step: { name?: string }) =>
+        step.name === "Retain verified deployment artifact",
+    ).with.path,
+  ).toBe("deployment-artifact");
+  expect(
+    deploy.jobs.deploy.steps.find(
+      (step: { name?: string }) =>
+        step.name === "Retain verified deployment artifact",
+    ).with["if-no-files-found"],
+  ).toBe("error");
+  expect(
+    deploy.jobs.deploy.steps.find(
       (step: { name?: string }) => step.name === "Diff and deploy CDK stacks",
     ).run,
   ).toContain("pnpm --filter @pirh/cdk run diff");

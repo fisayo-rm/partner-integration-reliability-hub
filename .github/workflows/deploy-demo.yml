@@ -100,12 +100,13 @@ jobs:
         run: pnpm smoke:hosted
       - name: Prepare immutable rollback artifact
         env:
-          DEPLOYMENT_METADATA_FILE: .deployment-artifact/deployment.json
+          DEPLOYMENT_METADATA_FILE: deployment-artifact/deployment.json
           HOSTED_CONSOLE_ORIGIN: ${{ env.HOSTED_CONSOLE_ORIGIN }}
-        run: mkdir -p .deployment-artifact/console; cp -R apps/console/dist/. .deployment-artifact/console; node scripts/record-demo-deployment.mjs
+        run: mkdir -p deployment-artifact/console; cp -R apps/console/dist/. deployment-artifact/console; node scripts/record-demo-deployment.mjs
       - name: Retain verified deployment artifact
         uses: actions/upload-artifact@v4
         with:
           name: pirh-demo-deployment-${{ github.run_id }}
-          path: .deployment-artifact
+          path: deployment-artifact
           retention-days: 90
+          if-no-files-found: error

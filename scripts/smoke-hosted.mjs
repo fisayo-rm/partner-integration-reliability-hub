@@ -195,24 +195,55 @@ if (!containsEvent(alpha) || !containsEvent(beta))
   throw new Error("Hosted mock capture evidence is incomplete.");
 const browser = await chromium.launch({ headless: true });
 try {
-  const page = await browser.newPage();
-  await page.goto(`${consoleOrigin.replace(/\/$/, "")}/login`, {
-    waitUntil: "networkidle",
-    timeout: 20_000,
-  });
-  await page.getByRole("button", { name: "Sign in", exact: true }).click();
-  await page.locator('input[name="username"]').fill("admin@pirh.demo");
-  await page.locator('input[name="password"]').fill(adminPassword);
-  await page.locator("form#primary-form button[type=submit]").click();
-  await page.waitForURL(
-    (url) =>
-      url.origin === consoleOrigin.replace(/\/$/, "") &&
-      url.pathname === "/overview",
-    { timeout: 30_000 },
-  );
-  await page.getByRole("heading", { name: "Overview" }).waitFor({
-    timeout: 30_000,
-  });
+  const consoleDeadline = Date.now() + 90_000;
+  let page;
+  let context;
+  let lastConsoleEvidence = "not attempted";
+  while (Date.now() < consoleDeadline && page === undefined) {
+    const candidateContext = await browser.newContext();
+    const candidate = await candidateContext.newPage();
+    try {
+      await candidate.goto(`${consoleOrigin.replace(/\/$/, "")}/login`, {
+        waitUntil: "networkidle",
+        timeout: 20_000,
+      });
+      await candidate
+        .getByRole("button", { name: "Sign in", exact: true })
+        .click();
+      await candidate.locator('input[name="username"]').fill("admin@pirh.demo");
+      await candidate.locator('input[name="password"]').fill(adminPassword);
+      await candidate.locator("form#primary-form button[type=submit]").click();
+      await candidate.waitForURL(
+        (url) =>
+          url.origin === consoleOrigin.replace(/\/$/, "") &&
+          url.pathname === "/overview",
+        { timeout: Math.min(20_000, consoleDeadline - Date.now()) },
+      );
+      await candidate.getByRole("heading", { name: "Overview" }).waitFor({
+        timeout: Math.min(20_000, consoleDeadline - Date.now()),
+      });
+      page = candidate;
+      context = candidateContext;
+    } catch (error) {
+      const diagnostic = await candidate
+        .evaluate(() => ({
+          url: globalThis.location.href,
+          text: globalThis.document.body.innerText.slice(0, 500),
+        }))
+        .catch(() => ({ url: "unavailable", text: "unavailable" }));
+      lastConsoleEvidence = JSON.stringify({
+        error: error instanceof Error ? error.message : String(error),
+        diagnostic,
+      });
+      await candidateContext.close();
+      if (Date.now() < consoleDeadline)
+        await new Promise((resolve) => setTimeout(resolve, 2_000));
+    }
+  }
+  if (page === undefined)
+    throw new Error(
+      `Hosted console did not complete login before the 90-second propagation deadline: ${lastConsoleEvidence}`,
+    );
   await page.goto(
     `${consoleOrigin.replace(/\/$/, "")}/events/${acceptance.eventId}`,
     {
@@ -238,6 +269,7 @@ try {
     throw new Error(
       "Hosted console did not display both successful deliveries.",
     );
+  await context.close();
 } finally {
   await browser.close();
 }

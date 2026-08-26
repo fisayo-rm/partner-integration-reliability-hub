@@ -6,6 +6,7 @@ export default tseslint.config(
   {
     ignores: [
       "**/dist/**",
+      "**/cdk.out/**",
       "**/node_modules/**",
       "baselines/**",
       "implementation/**",

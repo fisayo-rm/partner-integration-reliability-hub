@@ -11,6 +11,7 @@
     { "path": "../../packages/secrets" },
     { "path": "../../packages/transformation" },
     { "path": "../../packages/partner-http" },
-    { "path": "../../packages/observability" }
+    { "path": "../../packages/observability" },
+    { "path": "../../packages/config" }
   ]
 }

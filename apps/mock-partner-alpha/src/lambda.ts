@@ -10,6 +10,9 @@ interface FunctionUrlEvent {
   readonly isBase64Encoded?: boolean;
 }
 let app: ReturnType<typeof buildMockPartnerAlpha> | undefined;
+let configuration:
+  | { readonly apiKey: string; readonly controlToken: string }
+  | undefined;
 async function value(name: string) {
   const parameter = await new SSMClient({
     region: process.env.AWS_REGION ?? "us-east-1",
@@ -23,13 +26,18 @@ export async function functionUrlHandler(event: FunctionUrlEvent): Promise<{
   headers: Record<string, string | string[] | number | undefined>;
   body: string;
 }> {
-  if (app === undefined)
-    app = buildMockPartnerAlpha({
-      apiKey: await value(String(process.env.MOCK_ALPHA_API_KEY_PARAMETER)),
-      controlToken: await value(
-        String(process.env.MOCK_CONTROL_TOKEN_PARAMETER),
-      ),
-    });
+  const nextConfiguration = {
+    apiKey: await value(String(process.env.MOCK_ALPHA_API_KEY_PARAMETER)),
+    controlToken: await value(String(process.env.MOCK_CONTROL_TOKEN_PARAMETER)),
+  };
+  if (
+    app === undefined ||
+    configuration?.apiKey !== nextConfiguration.apiKey ||
+    configuration.controlToken !== nextConfiguration.controlToken
+  ) {
+    app = buildMockPartnerAlpha(nextConfiguration);
+    configuration = nextConfiguration;
+  }
   const response = await (
     app.inject as unknown as (input: unknown) => Promise<{
       statusCode: number;

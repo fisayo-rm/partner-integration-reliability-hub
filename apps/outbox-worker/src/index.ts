@@ -5,6 +5,7 @@ import {
   SchedulerClient,
 } from "@aws-sdk/client-scheduler";
 import { DynamoPersistence } from "@pirh/persistence";
+import { guardLocalProcessStartup } from "@pirh/config";
 import {
   createTelemetryRuntime,
   withExtractedTrace,
@@ -55,10 +56,12 @@ const sqs = createSqsClient({
 const routing = new ElasticMqQueue(
   sqs,
   process.env.ROUTING_QUEUE_NAME ?? "pirh-routing-local",
+  process.env.ROUTING_QUEUE_URL,
 );
 const delivery = new ElasticMqQueue(
   sqs,
   process.env.DELIVERY_QUEUE_NAME ?? "pirh-delivery-local",
+  process.env.DELIVERY_QUEUE_URL,
 );
 const intervalMs = Number(process.env.OUTBOX_POLL_INTERVAL_MS ?? 500);
 let stopping = false;
@@ -85,7 +88,13 @@ async function scheduleLongDelay(
     throw new Error("Scheduler target configuration is unavailable.");
   await scheduler.send(
     new CreateScheduleCommand({
-      Name: `pirh-demo-${deliveryId}-${nextAttemptNumber}`.slice(0, 64),
+      Name: `${process.env.SCHEDULER_NAME_PREFIX ?? "pirh-demo"}-${deliveryId}-${nextAttemptNumber}`.slice(
+        0,
+        64,
+      ),
+      ...(process.env.SCHEDULER_GROUP_NAME === undefined
+        ? {}
+        : { GroupName: process.env.SCHEDULER_GROUP_NAME }),
       ScheduleExpression: `at(${notBefore.toISOString().replace(/\.\d{3}Z$/, "")})`,
       FlexibleTimeWindow: { Mode: "OFF" },
       ActionAfterCompletion: "DELETE",
@@ -175,6 +184,13 @@ export async function tick() {
       await publish(record);
 }
 export async function runLocal(): Promise<void> {
+  await guardLocalProcessStartup({
+    diagnostics: (result) =>
+      runtime.logger.info("Hybrid environment attested", {
+        event: "hybrid.attestation",
+        ...result,
+      }),
+  });
   while (!stopping) {
     await tick();
     await new Promise((resolve) => setTimeout(resolve, intervalMs));

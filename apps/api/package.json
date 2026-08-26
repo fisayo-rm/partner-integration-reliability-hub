@@ -31,6 +31,7 @@
     "@pirh/partner-http": "workspace:*",
     "@pirh/observability": "workspace:*",
     "@pirh/config-portability": "workspace:*",
+    "@pirh/config": "workspace:*",
     "fastify": "5.8.5"
   }
 }

@@ -79,6 +79,14 @@ test("pull request workflow covers engineering, Compose, container, and hybrid s
       ),
     );
   expect(value.jobs["m11-hybrid-guard"].name).toBe("M11 hybrid safety guard");
+  expect(
+    value.jobs["m11-hybrid-guard"].steps.find(
+      (step: { name?: string }) =>
+        step.name === "Hybrid startup and IAM safety tests",
+    ).run,
+  ).toBe(
+    "pnpm exec vitest run tests/config/hybrid.test.ts tests/cdk/hybrid-stack.test.ts",
+  );
   expect(JSON.stringify(value.jobs["m11-hybrid-guard"])).toContain(
     "Hybrid startup and IAM safety tests",
   );

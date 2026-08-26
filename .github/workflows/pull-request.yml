@@ -122,6 +122,6 @@ jobs:
         with: { node-version: 24, cache: pnpm }
       - run: pnpm install --frozen-lockfile
       - name: Hybrid startup and IAM safety tests
-        run: pnpm test -- tests/config/hybrid.test.ts tests/cdk/hybrid-stack.test.ts
+        run: pnpm exec vitest run tests/config/hybrid.test.ts tests/cdk/hybrid-stack.test.ts
       - name: Hybrid CDK synthesis
         run: pnpm hybrid:synth

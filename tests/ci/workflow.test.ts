@@ -78,7 +78,7 @@ test("pull request workflow covers engineering, Compose, container, and hybrid s
         (step: { uses?: string }) => step.uses === "actions/setup-node@v5",
       ),
     );
-  expect(value.jobs["m11-hybrid-guard"].name).toBe("M11 hybrid safety guard");
+  expect(value.jobs["m11-hybrid-guard"].name).toBe("M11 hybrid guard");
   expect(
     value.jobs["m11-hybrid-guard"].steps.find(
       (step: { name?: string }) =>

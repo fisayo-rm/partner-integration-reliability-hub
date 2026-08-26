@@ -112,7 +112,7 @@ jobs:
           severity: HIGH,CRITICAL
           exit-code: "1"
   m11-hybrid-guard:
-    name: M11 hybrid safety guard
+    name: M11 hybrid guard
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v5

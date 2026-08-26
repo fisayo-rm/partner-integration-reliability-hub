@@ -1,0 +1,34 @@
+{
+  "version": 1,
+  "milestone": "M12",
+  "rows": [
+    {
+      "criterion": "Started-attempt lease recovery records immutable timeout evidence",
+      "verification": "tests/m12/recovery.test.ts"
+    },
+    {
+      "criterion": "Recovery snapshots exclude secrets and restore targets fail closed",
+      "verification": "tests/m12/recovery.test.ts"
+    },
+    {
+      "criterion": "Default and observability local profiles",
+      "verification": "pnpm local:verify:default && pnpm local:verify:observability"
+    },
+    {
+      "criterion": "Seven controlled load scenarios and 100/s benchmark",
+      "verification": "pnpm load:run"
+    },
+    {
+      "criterion": "Hosted trace, metric, log, dashboard and alarm smoke",
+      "verification": "pnpm smoke:hosted"
+    },
+    {
+      "criterion": "Infrastructure and hybrid synthesis",
+      "verification": "pnpm cdk:synth && pnpm hybrid:synth"
+    },
+    {
+      "criterion": "PR and deep verification workflows",
+      "verification": ".github/workflows/pull-request.yml && .github/workflows/deep-verification.yml"
+    }
+  ]
+}

@@ -26,6 +26,17 @@ export default tseslint.config(
         fetch: "readonly",
         AbortSignal: "readonly",
         setTimeout: "readonly",
+        URL: "readonly",
+      },
+    },
+  },
+  {
+    files: ["scripts/load/**/*.js"],
+    languageOptions: {
+      globals: {
+        __ENV: "readonly",
+        __ITER: "readonly",
+        __VU: "readonly",
       },
     },
   },

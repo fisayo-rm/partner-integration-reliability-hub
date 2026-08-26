@@ -116,6 +116,23 @@ Resources:
                 Effect: Allow
                 Action: sts:GetCallerIdentity
                 Resource: "*"
+              - Sid: InspectDemoObservability
+                Effect: Allow
+                Action:
+                  - logs:DescribeLogGroups
+                  - logs:DescribeLogStreams
+                  - logs:FilterLogEvents
+                  - logs:GetLogEvents
+                  - logs:StartQuery
+                  - logs:GetQueryResults
+                  - cloudwatch:DescribeAlarms
+                  - cloudwatch:GetDashboard
+                  - cloudwatch:GetMetricData
+                  - cloudwatch:ListMetrics
+                  - xray:GetTraceSummaries
+                  - xray:BatchGetTraces
+                  - xray:GetServiceGraph
+                Resource: "*"
       Tags:
         - Key: project
           Value: partner-integration-reliability-hub

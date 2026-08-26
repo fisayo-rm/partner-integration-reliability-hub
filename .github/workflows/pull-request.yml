@@ -36,6 +36,8 @@ jobs:
         run: pnpm test:security
       - name: Configuration bundle schema and exclusion scan
         run: pnpm config:verify
+      - name: M12 acceptance matrix integrity
+        run: pnpm acceptance:validate
       - name: Explicit console production build
         run: pnpm --filter @pirh/console build
       - name: Lambda and CDK bundle build

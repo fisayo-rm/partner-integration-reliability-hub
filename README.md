@@ -123,6 +123,35 @@ mutating anything, then refreshes it with the resulting plan. Omitted resources 
 not deleted or disabled; unresolved aliases and immutable-version changes are
 reported rather than forced.
 
+## Recovery, load, and final acceptance (M12)
+
+Recovery snapshots are distinct from configuration portability bundles: they retain
+one tenant's durable operational state for restoration only into fresh isolated
+tables. They never read local secret values and reject secret-shaped content.
+
+```bash
+# Local controlled recovery snapshot; output is intentionally gitignored.
+pnpm ops:backup --environment local --tenant tenant_01J0A1B2C3D4E5F6G7H8J9K0MN --output backups/demo
+pnpm ops:restore --source backups/demo/manifest.v1.json --target-environment restore-test \
+  --core-table pirh-restore-core --audit-table pirh-restore-audit --allow-restore
+
+# From an already-running, isolated local Compose environment.
+K6_SCENARIO=one-destination K6_RATE=100 K6_DURATION=60s pnpm load:run
+pnpm acceptance:validate
+```
+
+The k6 profile uses an open constant-arrival-rate executor and writes only ignored
+machine-readable artifacts to `load-artifacts/`. Run all named scenarios through
+the scheduled or manual **Deep verification** workflow. Its report must include the
+environment, payload size, warm-up and duration, accepted rate, queue depth,
+latencies, retries, versions, resource limits, and emulator limitations before any
+100 events/second claim is made. Hosted performance remains optional under ADR-021.
+
+Runbooks for partner outage, invalid credentials, growing delivery queue,
+infrastructure DLQ, stuck outbox, and restore are in `docs/runbooks/`. They are
+designed for evidence-first operation: never purge queues, mutate history, or copy
+secret values as a recovery shortcut.
+
 ## Repository boundaries
 
 - `apps/` contains runtime composition points only.

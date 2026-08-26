@@ -217,6 +217,7 @@ function workerFunction(
   timeout: Duration,
   concurrency: number,
   environment: Record<string, string>,
+  telemetry = true,
 ) {
   const accountReservation = Number.parseInt(
     process.env.PIRH_DEMO_RESERVED_CONCURRENCY ?? "0",
@@ -242,10 +243,56 @@ function workerFunction(
     environment: {
       APP_ENV: "demo",
       AWS_NODEJS_CONNECTION_REUSE_ENABLED: "1",
+      ...(telemetry
+        ? {
+            PIRH_OTLP_ENDPOINT: "http://localhost:4318",
+            OPENTELEMETRY_COLLECTOR_CONFIG_URI: "/var/task/collector.yaml",
+          }
+        : {}),
       ...environment,
     },
-    bundling: { minify: true, sourceMap: true, target: "node24" },
+    ...(telemetry
+      ? {
+          layers: [
+            lambda.LayerVersion.fromLayerVersionArn(
+              stack,
+              `${id}AdotCollector`,
+              `arn:aws:lambda:${region}:901920570463:layer:aws-otel-collector-arm64-ver-0-151-0:1`,
+            ),
+          ],
+        }
+      : {}),
+    bundling: {
+      minify: true,
+      sourceMap: true,
+      target: "node24",
+      ...(telemetry
+        ? {
+            commandHooks: {
+              beforeBundling: () => [],
+              beforeInstall: () => [],
+              afterBundling: (_inputDir: string, outputDir: string) => [
+                `cp ${source("infrastructure/cdk/src/collector.yaml")} ${outputDir}/collector.yaml`,
+              ],
+            },
+          }
+        : {}),
+    },
   });
+  if (telemetry)
+    fn.addToRolePolicy(
+      new iam.PolicyStatement({
+        actions: [
+          "xray:PutTraceSegments",
+          "xray:PutTelemetryRecords",
+          "cloudwatch:PutMetricData",
+          "logs:CreateLogGroup",
+          "logs:CreateLogStream",
+          "logs:PutLogEvents",
+        ],
+        resources: ["*"],
+      }),
+    );
   const version = fn.currentVersion;
   const alias = new lambda.Alias(stack, `${id}Live`, {
     aliasName: "live",
@@ -642,6 +689,46 @@ class ObservabilityStack extends PirhStack {
         left: [
           messaging.routing.metricApproximateAgeOfOldestMessage(),
           messaging.delivery.metricApproximateAgeOfOldestMessage(),
+        ],
+      }),
+      new cloudwatch.GraphWidget({
+        title: "Application delivery outcomes",
+        left: [
+          new cloudwatch.Metric({
+            namespace: "PIRH/Demo",
+            metricName: "delivery.success",
+            statistic: "sum",
+            period: Duration.minutes(5),
+          }),
+          new cloudwatch.Metric({
+            namespace: "PIRH/Demo",
+            metricName: "delivery.retry_scheduled",
+            statistic: "sum",
+            period: Duration.minutes(5),
+          }),
+          new cloudwatch.Metric({
+            namespace: "PIRH/Demo",
+            metricName: "delivery.dead_lettered",
+            statistic: "sum",
+            period: Duration.minutes(5),
+          }),
+        ],
+      }),
+      new cloudwatch.GraphWidget({
+        title: "Application acceptance and outbox",
+        left: [
+          new cloudwatch.Metric({
+            namespace: "PIRH/Demo",
+            metricName: "event.accepted",
+            statistic: "sum",
+            period: Duration.minutes(5),
+          }),
+          new cloudwatch.Metric({
+            namespace: "PIRH/Demo",
+            metricName: "outbox.published",
+            statistic: "sum",
+            period: Duration.minutes(5),
+          }),
         ],
       }),
     );

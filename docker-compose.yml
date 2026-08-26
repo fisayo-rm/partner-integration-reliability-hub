@@ -325,6 +325,20 @@ services:
         "grafana-data:/var/lib/grafana",
       ]
     ports: ["3001:3000"]
+  k6:
+    image: grafana/k6:0.57.0
+    profiles: ["load"]
+    working_dir: /work
+    volumes: ["./scripts/load:/work:ro", "./load-artifacts:/artifacts"]
+    environment:
+      PIRH_LOAD_BASE_URL: http://api:3000
+      K6_SUMMARY_EXPORT: /artifacts/summary.json
+      K6_SCENARIO: ${K6_SCENARIO:-one-destination}
+      K6_RATE: ${K6_RATE:-100}
+      K6_DURATION: ${K6_DURATION:-60s}
+      LOCAL_DEMO_CLIENT_ID: ${LOCAL_DEMO_CLIENT_ID:-cli_01J0A1B2C3D4E5F6G7H8J9K0MN}
+      LOCAL_SEED_PRODUCER_SECRET: ${LOCAL_SEED_PRODUCER_SECRET:-}
+    command: ["run", "/work/m12-workload.js"]
 
 volumes:
   dynamodb-data: {}

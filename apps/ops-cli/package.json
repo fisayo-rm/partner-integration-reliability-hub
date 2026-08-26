@@ -1,0 +1,14 @@
+{
+  "name": "@pirh/ops-cli",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "build": "tsc --build"
+  },
+  "dependencies": {
+    "@aws-sdk/client-dynamodb": "3.1111.0",
+    "@aws-sdk/lib-dynamodb": "3.1111.0",
+    "@pirh/recovery": "workspace:*"
+  }
+}

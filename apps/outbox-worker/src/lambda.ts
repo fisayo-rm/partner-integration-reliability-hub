@@ -1,4 +1,4 @@
-import { tick } from "./index.js";
+import { runtime, tick } from "./index.js";
 
 interface StreamRecord {
   readonly eventID: string;
@@ -11,8 +11,10 @@ interface StreamEvent {
 export async function streamHandler(event: StreamEvent) {
   try {
     await tick();
+    await runtime.flush();
     return { batchItemFailures: [] as { itemIdentifier: string }[] };
   } catch {
+    await runtime.flush();
     return {
       batchItemFailures: event.Records.map((record) => ({
         itemIdentifier: record.eventID,

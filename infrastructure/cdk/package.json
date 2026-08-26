@@ -8,6 +8,10 @@
     "synth": "pnpm exec cdk synth --strict",
     "diff": "pnpm exec cdk diff --strict",
     "deploy": "pnpm exec cdk deploy --all --require-approval never",
+    "hybrid:synth": "pnpm exec cdk synth --strict --app 'pnpm exec tsx src/hybrid-app.ts'",
+    "hybrid:diff": "pnpm exec cdk diff --strict --app 'pnpm exec tsx src/hybrid-app.ts'",
+    "hybrid:deploy": "pnpm exec cdk deploy PirhHybridFisayoRm --require-approval never --app 'pnpm exec tsx src/hybrid-app.ts'",
+    "hybrid:destroy": "pnpm exec cdk destroy PirhHybridFisayoRm --force --app 'pnpm exec tsx src/hybrid-app.ts'",
     "test": "vitest run tests"
   },
   "dependencies": {

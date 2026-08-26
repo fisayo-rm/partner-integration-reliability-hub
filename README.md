@@ -145,6 +145,56 @@ seeds non-source SSM values, deploys static console assets, and records rollback
 Hosted rollback changes Lambda aliases and redeploys a recorded Pages artifact only;
 it never rewrites DynamoDB event, attempt, audit, or configuration history.
 
+## Guarded hybrid AWS development (M11)
+
+`local` remains the default and does not require AWS credentials. The optional
+`hybrid` profile runs local application processes against the dedicated
+`PirhHybridFisayoRm` development stack only. It never targets the demo stack.
+
+Deploy with an authorized provisioning identity. To run a local hybrid process or
+smoke, log in as a non-root IAM, IAM Identity Center, or federated identity that can
+read this stack and assume `PirhHybridFisayoRmDeveloperRole`; AWS does not permit a
+root identity to assume that role. After short-lived AWS CLI login, synthesize and
+inspect the isolated stack before deploying it:
+
+```bash
+pnpm hybrid:synth
+pnpm hybrid:diff
+pnpm hybrid:deploy
+```
+
+Copy `.env.hybrid.example` only for its non-secret account/stack inputs. Use the
+wrapper to resolve CloudFormation outputs and assume the dedicated developer role;
+it does not print temporary credentials:
+
+```bash
+pnpm hybrid:run -- api
+pnpm hybrid:run -- outbox-worker
+pnpm hybrid:run -- router-worker
+pnpm hybrid:run -- delivery-worker
+```
+
+Every local hybrid entrypoint requires `ALLOW_REMOTE_AWS=true`, validates the AWS
+account, stack tags, expected role, and all configured resource identifiers before
+performing remote work. A local process configured as `demo`, `performance`, or
+`production-reference` exits immediately. The developer role has no access to the
+shared PIRH table, queue, or SSM namespaces.
+
+Run the live hybrid smoke only after the stack is deployed and an authenticated
+AWS CLI session is available:
+
+```bash
+pnpm hybrid:smoke
+```
+
+The stack is intentionally low-cost and per-developer. It remains available for
+managed-service debugging until explicitly torn down; destruction deletes its
+development tables, queues, Cognito pool, and mock functions:
+
+```bash
+pnpm hybrid:destroy
+```
+
 The complete local Docker topology, service health checks, and all domain/API
 contracts are deliberately deferred to M01. See the frozen architecture baseline
 and accepted ADRs in the repository's agent-facing materials for the governing design.

@@ -1,8 +1,13 @@
 import { DescribeTableCommand, DynamoDBClient } from "@aws-sdk/client-dynamodb";
 import { DynamoDBDocumentClient } from "@aws-sdk/lib-dynamodb";
 import { GetParameterCommand, SSMClient } from "@aws-sdk/client-ssm";
-import { GetQueueUrlCommand, SQSClient } from "@aws-sdk/client-sqs";
+import {
+  GetQueueAttributesCommand,
+  GetQueueUrlCommand,
+  SQSClient,
+} from "@aws-sdk/client-sqs";
 import { ConfigurationPortabilityService } from "@pirh/config-portability";
+import { guardLocalProcessStartup } from "@pirh/config";
 import {
   ControlPlaneService,
   EventIngestionService,
@@ -79,18 +84,31 @@ async function parameter(client: SSMClient, name: string): Promise<string> {
 }
 
 /** Creates one dependency graph per Lambda execution environment. */
-export async function createApiDependencies(): Promise<{
+export async function createApiDependencies(
+  input: {
+    readonly localProcess?: boolean;
+  } = {},
+): Promise<{
   readonly dependencies: ApiDependencies;
   readonly shutdown: () => Promise<void>;
 }> {
+  if (input.localProcess === true)
+    await guardLocalProcessStartup({
+      diagnostics: (result) =>
+        console.info(
+          JSON.stringify({ event: "hybrid.attestation", ...result }),
+        ),
+    });
   const dynamoEndpoint = local ? required("DYNAMODB_ENDPOINT") : undefined;
   const queueEndpoint = local ? required("ELASTICMQ_ENDPOINT") : undefined;
   const coreTableName = process.env.CORE_TABLE_NAME ?? "pirh-core-local";
   const auditTableName = process.env.AUDIT_TABLE_NAME ?? "pirh-audit-local";
   const routingQueueName =
     process.env.ROUTING_QUEUE_NAME ?? "pirh-routing-local";
+  const routingQueueUrl = process.env.ROUTING_QUEUE_URL;
   const deliveryQueueName =
     process.env.DELIVERY_QUEUE_NAME ?? "pirh-delivery-local";
+  const deliveryQueueUrl = process.env.DELIVERY_QUEUE_URL;
   const documentClient = DynamoDBDocumentClient.from(
     new DynamoDBClient({ region, ...awsConfig(dynamoEndpoint) }),
   );
@@ -173,10 +191,19 @@ export async function createApiDependencies(): Promise<{
           });
       }),
       elasticMq: boundedProbe("queues", async () => {
-        for (const QueueName of [routingQueueName, deliveryQueueName])
-          await sqsClient.send(new GetQueueUrlCommand({ QueueName }), {
-            abortSignal: AbortSignal.timeout(1_000),
-          });
+        for (const [QueueName, QueueUrl] of [
+          [routingQueueName, routingQueueUrl],
+          [deliveryQueueName, deliveryQueueUrl],
+        ] as const) {
+          if (QueueUrl === undefined)
+            await sqsClient.send(new GetQueueUrlCommand({ QueueName }), {
+              abortSignal: AbortSignal.timeout(1_000),
+            });
+          else
+            await sqsClient.send(new GetQueueAttributesCommand({ QueueUrl }), {
+              abortSignal: AbortSignal.timeout(1_000),
+            });
+        }
       }),
       controlPlane: {
         service,

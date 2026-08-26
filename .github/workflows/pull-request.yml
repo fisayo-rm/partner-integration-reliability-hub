@@ -116,5 +116,14 @@ jobs:
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v5
-      - name: Assert hybrid implementation stays deferred
-        run: test ! -e infrastructure/hybrid
+      - uses: pnpm/action-setup@v4
+        with: { version: 10.18.2 }
+      - uses: actions/setup-node@v5
+        with: { node-version: 24, cache: pnpm }
+      - run: pnpm install --frozen-lockfile
+      - name: Build workspace packages for hybrid synth
+        run: pnpm build
+      - name: Hybrid startup and IAM safety tests
+        run: pnpm exec vitest run tests/config/hybrid.test.ts tests/cdk/hybrid-stack.test.ts
+      - name: Hybrid CDK synthesis
+        run: pnpm hybrid:synth

@@ -27,8 +27,10 @@ export class ElasticMqQueue implements QueuePublisher {
   public constructor(
     private readonly client: SQSClient,
     private readonly queueName: string,
+    private readonly configuredQueueUrl?: string,
   ) {}
   private async url(): Promise<string> {
+    if (this.configuredQueueUrl !== undefined) return this.configuredQueueUrl;
     if (this.queueUrl !== undefined) return this.queueUrl;
     const response = await this.client.send(
       new GetQueueUrlCommand({ QueueName: this.queueName }),

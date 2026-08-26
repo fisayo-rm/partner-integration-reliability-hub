@@ -16,6 +16,7 @@
     "@pirh/partner-http": "workspace:*",
     "@pirh/persistence": "workspace:*",
     "@pirh/queue": "workspace:*",
-    "@pirh/secrets": "workspace:*"
+    "@pirh/secrets": "workspace:*",
+    "@pirh/config": "workspace:*"
   }
 }

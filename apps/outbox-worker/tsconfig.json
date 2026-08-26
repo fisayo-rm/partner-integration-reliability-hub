@@ -2,5 +2,8 @@
   "extends": "../../tsconfig.base.json",
   "compilerOptions": { "composite": true, "rootDir": "src", "outDir": "dist" },
   "include": ["src/**/*.ts"],
-  "references": [{ "path": "../../packages/observability" }]
+  "references": [
+    { "path": "../../packages/observability" },
+    { "path": "../../packages/config" }
+  ]
 }

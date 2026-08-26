@@ -3,7 +3,7 @@ import { createApiDependencies } from "./runtime.js";
 
 const port = Number.parseInt(process.env.API_PORT ?? "3000", 10);
 const host = process.env.API_HOST ?? "0.0.0.0";
-const runtime = await createApiDependencies();
+const runtime = await createApiDependencies({ localProcess: true });
 const app = await buildApi(runtime.dependencies);
 for (const signal of ["SIGINT", "SIGTERM"] as const)
   process.on(signal, () => void app.close());

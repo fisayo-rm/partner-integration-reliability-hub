@@ -1,6 +1,7 @@
 import { DynamoDBClient } from "@aws-sdk/client-dynamodb";
 import { DynamoDBDocumentClient } from "@aws-sdk/lib-dynamodb";
 import { RoutingService } from "@pirh/application";
+import { guardLocalProcessStartup } from "@pirh/config";
 import {
   createTelemetryRuntime,
   withExtractedTrace,
@@ -69,6 +70,7 @@ const queue = new ElasticMqQueue(
       : {}),
   }),
   process.env.ROUTING_QUEUE_NAME ?? "pirh-routing-local",
+  process.env.ROUTING_QUEUE_URL,
 );
 let stopping = false;
 for (const signal of ["SIGINT", "SIGTERM"] as const)
@@ -76,6 +78,13 @@ for (const signal of ["SIGINT", "SIGTERM"] as const)
     stopping = true;
   });
 export async function runLocal(): Promise<void> {
+  await guardLocalProcessStartup({
+    diagnostics: (result) =>
+      runtime.logger.info("Hybrid environment attested", {
+        event: "hybrid.attestation",
+        ...result,
+      }),
+  });
   while (!stopping) {
     try {
       await consumeOne(queue, async (message, raw) => {

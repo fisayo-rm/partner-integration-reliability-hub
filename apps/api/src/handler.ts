@@ -7,7 +7,7 @@ export async function httpApiHandler(
   event: Parameters<ReturnType<typeof createLambdaHandler>>[0],
 ) {
   if (handler === undefined) {
-    const runtime = await createApiDependencies();
+    const runtime = await createApiDependencies({ localProcess: false });
     handler = createLambdaHandler(runtime.dependencies);
   }
   return await handler(event);

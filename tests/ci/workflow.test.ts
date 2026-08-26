@@ -11,7 +11,7 @@ async function workflow(name: string) {
   );
 }
 
-test("pull request workflow covers M10 engineering, Compose, container, and hybrid gates", async () => {
+test("pull request workflow covers engineering, Compose, container, and hybrid safety gates", async () => {
   const value = await workflow("pull-request.yml");
   expect(value.on.pull_request).toEqual({});
   expect(Object.keys(value.jobs)).toEqual([
@@ -78,6 +78,27 @@ test("pull request workflow covers M10 engineering, Compose, container, and hybr
         (step: { uses?: string }) => step.uses === "actions/setup-node@v5",
       ),
     );
+  expect(value.jobs["m11-hybrid-guard"].name).toBe("M11 hybrid guard");
+  expect(
+    value.jobs["m11-hybrid-guard"].steps.find(
+      (step: { name?: string }) =>
+        step.name === "Hybrid startup and IAM safety tests",
+    ).run,
+  ).toBe(
+    "pnpm exec vitest run tests/config/hybrid.test.ts tests/cdk/hybrid-stack.test.ts",
+  );
+  expect(
+    value.jobs["m11-hybrid-guard"].steps.find(
+      (step: { name?: string }) =>
+        step.name === "Build workspace packages for hybrid synth",
+    ).run,
+  ).toBe("pnpm build");
+  expect(JSON.stringify(value.jobs["m11-hybrid-guard"])).toContain(
+    "Hybrid startup and IAM safety tests",
+  );
+  expect(JSON.stringify(value.jobs["m11-hybrid-guard"])).toContain(
+    "pnpm hybrid:synth",
+  );
 });
 
 test("deployment uses protected OIDC and has a rollback entrypoint", async () => {

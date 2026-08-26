@@ -117,6 +117,10 @@ test("M12 lease recovery finalizes a started attempt as one timeout retry", asyn
   expect(writes).toContain('"outcome":"failed"');
   expect(writes).toContain('"state":"retry_scheduled"');
   expect(writes).toContain('"cause":"RETRY"');
+  // The same durable attempt and lease are conditional transaction predicates;
+  // an original worker returning after recovery cannot replace this timeout.
+  expect(writes).toContain("activeAttemptId = :attempt");
+  expect(writes).toContain("#outcome = :started");
 });
 
 test("M12 backup is tenant-scoped, omits local secrets, and writes a manifest checksum", async () => {

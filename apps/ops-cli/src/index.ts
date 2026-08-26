@@ -13,7 +13,8 @@ function fail(message: string): never {
   throw new Error(message);
 }
 const environment = argument("--environment");
-const local = environment === "local";
+const targetEnvironment = argument("--target-environment");
+const local = environment === "local" || targetEnvironment === "restore-test";
 const client = DynamoDBDocumentClient.from(
   new DynamoDBClient({
     region: process.env.AWS_REGION ?? "us-east-1",
@@ -50,7 +51,6 @@ if (command === "backup") {
   process.stdout.write(`${JSON.stringify(result, null, 2)}\n`);
 } else if (command === "restore") {
   const source = argument("--source");
-  const targetEnvironment = argument("--target-environment");
   const coreTableName = argument("--core-table");
   const auditTableName = argument("--audit-table");
   if (

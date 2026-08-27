@@ -5,7 +5,6 @@ import {
   InitiateAuthCommand,
   CognitoIdentityProviderClient,
 } from "@aws-sdk/client-cognito-identity-provider";
-import { GetParameterCommand, SSMClient } from "@aws-sdk/client-ssm";
 import { chromium } from "@playwright/test";
 
 const apiBase = process.env.HOSTED_API_URL;
@@ -15,6 +14,9 @@ const hostedLoginAuthority = process.env.VITE_OIDC_HOSTED_LOGIN_AUTHORITY;
 const adminPassword = process.env.DEMO_ADMIN_PASSWORD;
 const alphaUrl = process.env.HOSTED_MOCK_ALPHA_URL;
 const betaUrl = process.env.HOSTED_MOCK_BETA_URL;
+const producerSecret = process.env.HOSTED_PRODUCER_SECRET;
+const controlToken = process.env.HOSTED_MOCK_CONTROL_TOKEN;
+const region = process.env.AWS_REGION ?? "us-east-1";
 if (
   apiBase === undefined ||
   consoleOrigin === undefined ||
@@ -22,10 +24,12 @@ if (
   hostedLoginAuthority === undefined ||
   adminPassword === undefined ||
   alphaUrl === undefined ||
-  betaUrl === undefined
+  betaUrl === undefined ||
+  producerSecret === undefined ||
+  controlToken === undefined
 )
   throw new Error(
-    "Hosted API, console, Cognito hosted-login authority, mock URLs, and DEMO_ADMIN_PASSWORD are required.",
+    "Hosted API, console, Cognito hosted-login authority, mock URLs, and protected hosted-smoke values are required.",
   );
 const ready = await fetch(`${apiBase.replace(/\/$/, "")}/health/ready`, {
   signal: AbortSignal.timeout(10_000),
@@ -71,26 +75,6 @@ if (!hostedLoginPage.ok)
   throw new Error(
     `Hosted Cognito login page failed with ${hostedLoginPage.status}.`,
   );
-const region = process.env.AWS_REGION ?? "us-east-1";
-const ssm = new SSMClient({ region });
-const parameter = async (name) => {
-  const result = await ssm.send(
-    new GetParameterCommand({ Name: name, WithDecryption: true }),
-  );
-  if (result.Parameter?.Value === undefined)
-    throw new Error(`Required parameter ${name} is unavailable.`);
-  return result.Parameter.Value;
-};
-// CI may inject these values through its secret runtime. Local inspection runs
-// must not retrieve plaintext values themselves; use pre-injected values instead.
-const [producerSecret, controlToken] = await Promise.all([
-  process.env.HOSTED_PRODUCER_SECRET ??
-    parameter(
-      "/pirh/demo/tenants/tenant_01J0A1B2C3D4E5F6G7H8J9K0MN/secrets/producer-current",
-    ),
-  process.env.HOSTED_MOCK_CONTROL_TOKEN ??
-    parameter("/pirh/demo/system/mock-control-token"),
-]);
 const body = Buffer.from(
   JSON.stringify({
     eventType: "shipment.status_changed",

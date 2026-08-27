@@ -65,4 +65,6 @@ jobs:
           HOSTED_MOCK_ALPHA_URL: ${{ env.HOSTED_MOCK_ALPHA_URL }}
           HOSTED_MOCK_BETA_URL: ${{ env.HOSTED_MOCK_BETA_URL }}
           DEMO_ADMIN_PASSWORD: ${{ secrets.DEMO_ADMIN_PASSWORD }}
+          HOSTED_PRODUCER_SECRET: ${{ secrets.HOSTED_PRODUCER_SECRET }}
+          HOSTED_MOCK_CONTROL_TOKEN: ${{ secrets.HOSTED_MOCK_CONTROL_TOKEN }}
         run: pnpm smoke:hosted

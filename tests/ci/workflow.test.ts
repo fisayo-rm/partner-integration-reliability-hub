@@ -111,6 +111,8 @@ test("deployment uses protected OIDC and has a rollback entrypoint", async () =>
   expect(JSON.stringify(deploy)).not.toContain("AWS_ACCESS_KEY_ID");
   expect(JSON.stringify(deploy)).toContain("Hosted smoke");
   expect(JSON.stringify(deploy)).toContain("DEMO_ADMIN_PASSWORD");
+  expect(JSON.stringify(deploy)).toContain("HOSTED_PRODUCER_SECRET");
+  expect(JSON.stringify(deploy)).toContain("HOSTED_MOCK_CONTROL_TOKEN");
   expect(JSON.stringify(deploy)).toContain("HOSTED_MOCK_ALPHA_URL");
   expect(JSON.stringify(deploy)).toContain("OIDC_ISSUER");
   expect(JSON.stringify(deploy)).toContain("VITE_OIDC_AUTHORITY");
@@ -157,6 +159,8 @@ test("deployment uses protected OIDC and has a rollback entrypoint", async () =>
   expect(JSON.stringify(rollback)).toContain("CLOUDFLARE_API_TOKEN");
   expect(JSON.stringify(rollback)).toContain("Hosted recovery smoke");
   expect(JSON.stringify(rollback)).toContain("pnpm smoke:hosted");
+  expect(JSON.stringify(rollback)).toContain("HOSTED_PRODUCER_SECRET");
+  expect(JSON.stringify(rollback)).toContain("HOSTED_MOCK_CONTROL_TOKEN");
 });
 
 test("GitHub deployment role can discover and restore only demo Lambda aliases", async () => {

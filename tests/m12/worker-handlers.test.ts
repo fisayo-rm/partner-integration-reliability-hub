@@ -12,6 +12,13 @@ async function handlers() {
   return { delivery, outbox, router };
 }
 
+async function publisher() {
+  process.env.LOCAL_SECRET_MASTER_KEY_B64 = Buffer.alloc(32, 9).toString(
+    "base64",
+  );
+  return import("../../apps/outbox-worker/src/index.js");
+}
+
 const message = {
   schemaVersion: 1,
   messageType: "DELIVER",
@@ -80,6 +87,60 @@ test("M12 injected routing and outbox failures report only failed batch records"
       batchItemFailures: [{ itemIdentifier: "stream-1" }],
     },
   );
+});
+
+test("M12 outbox publisher retries a send/commit crash window without a production fault switch", async () => {
+  const { createOutboxPublisher } = await publisher();
+  let sends = 0;
+  let commits = 0;
+  let failures = 0;
+  const publish = createOutboxPublisher({
+    persistence: {
+      markPublished: async () => {
+        commits += 1;
+        if (commits === 1)
+          throw new Error("simulated process crash after send");
+      },
+      recordPublicationFailure: async () => {
+        failures += 1;
+      },
+      materializeScheduledWork: async () => undefined,
+    },
+    routing: {
+      publish: async () => {
+        sends += 1;
+      },
+    },
+    delivery: { publish: async () => undefined },
+    local: true,
+    scheduleLongDelay: async () => undefined,
+    now: () => new Date("2026-08-27T00:00:00.000Z"),
+    telemetry: { count: () => undefined, duration: () => undefined },
+    logger: { info: () => undefined, error: () => undefined },
+  } as never);
+  const record = {
+    outboxId: "obx_01J0A1B2C3D4E5F6G7H8J9K0MN",
+    kind: "ROUTE_EVENT",
+    tenantId: message.tenantId,
+    aggregateType: "EVENT",
+    aggregateId: message.eventId,
+    target: "ROUTING_QUEUE",
+    payload: {
+      eventId: message.eventId,
+      correlationId: message.correlationId,
+      cause: "INITIAL",
+    },
+    createdAt: "2026-08-27T00:00:00.000Z",
+    attempts: 0,
+    schemaVersion: 1,
+  } as never;
+  await publish(record);
+  await publish(record);
+  expect({ sends, commits, failures }).toEqual({
+    sends: 2,
+    commits: 2,
+    failures: 1,
+  });
 });
 
 test("M12 delivery-handler fault injection keeps stale work acknowledged and retryable failures isolated", async () => {

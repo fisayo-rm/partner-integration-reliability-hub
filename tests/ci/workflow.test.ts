@@ -175,3 +175,37 @@ test("GitHub deployment role can discover and restore only demo Lambda aliases",
   expect(bootstrap).not.toContain("function:PirhDemo*:*");
   expect(bootstrap).toContain("function:PirhDemo*");
 });
+
+test("M12 deep verification retains load, recovery, and synthesis evidence", async () => {
+  const deep = await workflow("deep-verification.yml");
+  expect(deep.on.workflow_dispatch).toEqual({});
+  expect(deep.on.schedule).toHaveLength(1);
+  const steps = deep.jobs["resilience-load-recovery"].steps;
+  expect(steps.map((step: { name?: string }) => step.name)).toEqual(
+    expect.arrayContaining([
+      "Run M12 engineering and acceptance checks",
+      "Synthesize hosted and hybrid infrastructure",
+      "Run isolated M12 load scenarios through the local verifier",
+      "Run isolated recovery restore drill",
+      "Retain deep-verification evidence",
+    ]),
+  );
+  expect(
+    steps.find(
+      (step: { name?: string }) =>
+        step.name === "Run M12 engineering and acceptance checks",
+    ).run,
+  ).toBe("pnpm verify && pnpm acceptance:validate");
+  expect(
+    steps.find(
+      (step: { name?: string }) =>
+        step.name === "Synthesize hosted and hybrid infrastructure",
+    ).run,
+  ).toBe("pnpm cdk:synth && pnpm hybrid:synth");
+  expect(
+    steps.find(
+      (step: { name?: string }) =>
+        step.name === "Run isolated recovery restore drill",
+    ).run,
+  ).toBe("pnpm restore:drill");
+});

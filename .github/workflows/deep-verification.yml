@@ -19,9 +19,14 @@ jobs:
       - uses: actions/setup-node@v5
         with: { node-version: 24, cache: pnpm }
       - run: pnpm install --frozen-lockfile
-      - run: pnpm test && pnpm acceptance:validate
+      - name: Run M12 engineering and acceptance checks
+        run: pnpm verify && pnpm acceptance:validate
+      - name: Synthesize hosted and hybrid infrastructure
+        run: pnpm cdk:synth && pnpm hybrid:synth
       - name: Run isolated M12 load scenarios through the local verifier
         run: pnpm local:verify:deep
+      - name: Run isolated recovery restore drill
+        run: pnpm restore:drill
       - name: Retain deep-verification evidence
         uses: actions/upload-artifact@v4
         with:

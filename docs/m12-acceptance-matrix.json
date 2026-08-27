@@ -1,106 +1,545 @@
 {
-  "version": 1,
+  "version": 2,
   "milestone": "M12",
+  "baseline": "TADD v0.5 section 51",
   "rows": [
     {
-      "id": "lease-recovery",
-      "criterion": "Started-attempt lease recovery records one immutable timeout, creates normal retry work, and prevents a late worker outcome.",
-      "verification": "tests/m12/recovery.test.ts"
+      "id": "race-duplicate-ingestion",
+      "category": "concurrency",
+      "criterion": "Duplicate ingestion creates one event and one idempotency result.",
+      "state": "verified-local",
+      "evidence": [
+        { "kind": "test", "path": "tests/integration/m02.integration.test.ts" }
+      ]
     },
     {
-      "id": "concurrency-races",
-      "criterion": "Required ingestion, worker, publication, circuit, rate, replay, and expired-lease races remain conditionally safe.",
-      "verification": "tests/integration/m02.integration.test.ts tests/m12/recovery.test.ts"
+      "id": "race-duplicate-delivery-worker",
+      "category": "concurrency",
+      "criterion": "Competing delivery workers acquire exactly one conditional lease.",
+      "state": "verified-local",
+      "evidence": [{ "kind": "test", "path": "tests/m12/concurrency.test.ts" }]
     },
     {
-      "id": "fault-isolation",
-      "criterion": "Injected worker paths isolate malformed, stale, transient queue, OAuth, partner timeout, missing-secret, disable, and finalization-conflict failures.",
-      "verification": "tests/m12/worker-handlers.test.ts"
+      "id": "race-duplicate-outbox-publication",
+      "category": "concurrency",
+      "criterion": "A send/commit crash window safely permits an at-least-once duplicate publication.",
+      "state": "verified-local",
+      "evidence": [
+        { "kind": "test", "path": "tests/m12/worker-handlers.test.ts" }
+      ]
     },
     {
-      "id": "recovery-contract",
-      "criterion": "BackupManifestV1 is deterministic, tenant-scoped, preserves durable tenant state, and excludes credential-shaped or local-secret records.",
-      "verification": "packages/recovery/src/index.ts tests/m12/recovery.test.ts"
+      "id": "race-half-open-probe",
+      "category": "concurrency",
+      "criterion": "Competing half-open circuit probes grant exactly one owner.",
+      "state": "verified-local",
+      "evidence": [{ "kind": "test", "path": "tests/m12/concurrency.test.ts" }]
     },
     {
-      "id": "isolated-restore",
-      "criterion": "Restore verifies checksums and safety invariants, requires an empty restore-test target, rebinds local aliases, and accepts a post-restore signed event.",
-      "verification": "scripts/restore-drill.mjs tests/m12/recovery.test.ts"
+      "id": "race-rate-boundary",
+      "category": "concurrency",
+      "criterion": "Competing workers at a rate boundary receive exactly one permit.",
+      "state": "verified-local",
+      "evidence": [{ "kind": "test", "path": "tests/m12/concurrency.test.ts" }]
     },
     {
-      "id": "observability-runtime",
-      "criterion": "Manual telemetry propagates business traces, flushes invocation telemetry, and supports hosted CloudWatch/X-Ray export.",
-      "verification": "packages/observability/src/index.ts infrastructure/cdk/lib"
+      "id": "race-duplicate-replay",
+      "category": "concurrency",
+      "criterion": "Concurrent replay requests are idempotent and append-only.",
+      "state": "verified-local",
+      "evidence": [
+        { "kind": "test", "path": "tests/integration/m02.integration.test.ts" }
+      ]
     },
     {
-      "id": "hosted-observability",
-      "criterion": "Hosted smoke checks correlated logs, application/native metrics, trace stages, dashboard/alarms, and secret-safe evidence.",
-      "verification": "scripts/smoke-hosted.mjs"
+      "id": "race-lease-expiry-inflight",
+      "category": "concurrency",
+      "criterion": "Lease expiry while the original request is outstanding records one timeout outcome and blocks a late overwrite.",
+      "state": "verified-local",
+      "evidence": [{ "kind": "test", "path": "tests/m12/recovery.test.ts" }]
+    },
+
+    {
+      "id": "fault-partner-before-commit",
+      "category": "fault",
+      "criterion": "A crash after a partner response and before finalization leaves durable lease recovery to complete state safely.",
+      "state": "verified-local",
+      "evidence": [
+        { "kind": "test", "path": "tests/m12/delivery-faults.test.ts" },
+        { "kind": "test", "path": "tests/m12/recovery.test.ts" }
+      ]
     },
     {
-      "id": "local-profiles",
-      "criterion": "Default and observability Compose profiles exercise integration demos, acceptance ordering, E2E, and local telemetry.",
-      "verification": "scripts/verify-local-platform.mjs scripts/demo-m07.mjs tests/e2e/console.spec.ts"
+      "id": "fault-outbox-after-sqs-send",
+      "category": "fault",
+      "criterion": "A publisher failure after SQS accepts the message records failure and makes a duplicate retry safe.",
+      "state": "verified-local",
+      "evidence": [
+        { "kind": "test", "path": "tests/m12/worker-handlers.test.ts" }
+      ]
     },
     {
-      "id": "ui-replay",
-      "criterion": "Authorized UI replay succeeds while viewer and cross-tenant access are denied and original history remains immutable.",
-      "verification": "tests/e2e/console.spec.ts"
+      "id": "fault-transient-dynamodb",
+      "category": "fault",
+      "criterion": "Transient DynamoDB failures are isolated to the affected worker record.",
+      "state": "verified-local",
+      "evidence": [
+        { "kind": "test", "path": "tests/m12/worker-handlers.test.ts" }
+      ]
     },
     {
-      "id": "acceptance-before-call",
-      "criterion": "A durable HTTP 202 acceptance precedes any partner call while publication is paused.",
-      "verification": "scripts/verify-local-platform.mjs"
+      "id": "fault-sqs-send",
+      "category": "fault",
+      "criterion": "SQS send failures are isolated to the affected stream record.",
+      "state": "verified-local",
+      "evidence": [
+        { "kind": "test", "path": "tests/m12/worker-handlers.test.ts" }
+      ]
     },
     {
-      "id": "load-scenarios",
-      "criterion": "All seven isolated k6 scenarios use signed constant-arrival-rate workload and the primary gate proves 100 accepted events per second.",
-      "verification": "scripts/load/m12-workload.js scripts/verify-local-platform.mjs docs/m12-local-load-report.md"
+      "id": "fault-oauth-timeout",
+      "category": "fault",
+      "criterion": "OAuth token failures append classified failure evidence.",
+      "state": "verified-local",
+      "evidence": [
+        { "kind": "test", "path": "tests/m12/delivery-faults.test.ts" }
+      ]
     },
     {
-      "id": "load-artifacts",
-      "criterion": "Measured report records environment, workload, queue, latency, retries, destination, and emulator limits without retaining generated artifacts.",
-      "verification": "docs/m12-local-load-report.md scripts/verify-local-platform.mjs"
+      "id": "fault-partner-timeout",
+      "category": "fault",
+      "criterion": "Partner timeout failures append classified timeout evidence.",
+      "state": "verified-local",
+      "evidence": [
+        { "kind": "test", "path": "tests/m12/delivery-faults.test.ts" }
+      ]
     },
     {
-      "id": "runbooks",
-      "criterion": "Partner outage, credentials, delivery backlog, DLQ, stuck outbox, and restore runbooks contain evidence, safe/unsafe actions, verification, and exercise results.",
-      "verification": "docs/runbooks scripts/restore-drill.mjs"
+      "id": "fault-malformed-message",
+      "category": "fault",
+      "criterion": "Malformed queue messages are retried without poisoning unrelated records.",
+      "state": "verified-local",
+      "evidence": [
+        { "kind": "test", "path": "tests/m12/worker-handlers.test.ts" }
+      ]
     },
     {
-      "id": "ci-gates",
-      "criterion": "PR engineering gate retains fast resilience/matrix checks and deep verification is scheduled/manual with evidence upload.",
-      "verification": ".github/workflows/pull-request.yml .github/workflows/deep-verification.yml"
+      "id": "fault-stale-message",
+      "category": "fault",
+      "criterion": "Stale delivery messages are safely acknowledged.",
+      "state": "verified-local",
+      "evidence": [
+        { "kind": "test", "path": "tests/m12/worker-handlers.test.ts" }
+      ]
     },
     {
-      "id": "infrastructure-synthesis",
-      "criterion": "Hosted and hybrid infrastructure synthesize with the M12 telemetry and recovery changes.",
-      "verification": "infrastructure/cdk package.json"
+      "id": "fault-missing-secret",
+      "category": "fault",
+      "criterion": "Missing secrets append classified failure evidence without an outbound call.",
+      "state": "verified-local",
+      "evidence": [
+        { "kind": "test", "path": "tests/m12/delivery-faults.test.ts" }
+      ]
     },
     {
-      "id": "hosted-functional",
-      "criterion": "Hosted functional and observability smoke are explicit post-deployment acceptance evidence.",
-      "verification": "scripts/smoke-hosted.mjs package.json"
+      "id": "fault-destination-disabled",
+      "category": "fault",
+      "criterion": "A destination disabled during active delivery defers work without an outbound call.",
+      "state": "verified-local",
+      "evidence": [
+        { "kind": "test", "path": "tests/m12/delivery-faults.test.ts" }
+      ]
     },
     {
-      "id": "hybrid-safety",
-      "criterion": "Hybrid smoke and IAM-denial proof remain an explicit non-root verification step.",
-      "verification": "scripts/smoke-hybrid.mjs tests/config/hybrid.test.ts"
+      "id": "fault-circuit-finalization-conflict",
+      "category": "fault",
+      "criterion": "A finalization conflict is surfaced for retry while preserving the active durable lease.",
+      "state": "verified-local",
+      "evidence": [
+        { "kind": "test", "path": "tests/m12/delivery-faults.test.ts" }
+      ]
+    },
+
+    {
+      "id": "load-ingestion-only",
+      "category": "load",
+      "criterion": "Paused-worker ingestion-only workload uses signed constant arrival rate.",
+      "state": "verified-local",
+      "evidence": [
+        { "kind": "script", "path": "scripts/verify-local-platform.mjs" },
+        { "kind": "report", "path": "docs/m12-local-load-report.md" }
+      ]
     },
     {
-      "id": "adr-reconciliation",
+      "id": "load-one-destination",
+      "category": "load",
+      "criterion": "One enabled destination workload is independently seeded and measured.",
+      "state": "verified-local",
+      "evidence": [
+        { "kind": "script", "path": "scripts/verify-local-platform.mjs" },
+        { "kind": "workload", "path": "scripts/load/m12-workload.js" }
+      ]
+    },
+    {
+      "id": "load-two-destinations",
+      "category": "load",
+      "criterion": "Two enabled destinations workload is independently seeded and measured.",
+      "state": "verified-local",
+      "evidence": [
+        { "kind": "script", "path": "scripts/verify-local-platform.mjs" },
+        { "kind": "workload", "path": "scripts/load/m12-workload.js" }
+      ]
+    },
+    {
+      "id": "load-slow-partner",
+      "category": "load",
+      "criterion": "Slow Beta does not prevent healthy processing evidence.",
+      "state": "verified-local",
+      "evidence": [
+        { "kind": "script", "path": "scripts/verify-local-platform.mjs" },
+        { "kind": "workload", "path": "scripts/load/m12-workload.js" }
+      ]
+    },
+    {
+      "id": "load-high-retry",
+      "category": "load",
+      "criterion": "High retry workload is independently seeded and measured.",
+      "state": "verified-local",
+      "evidence": [
+        { "kind": "script", "path": "scripts/verify-local-platform.mjs" },
+        { "kind": "workload", "path": "scripts/load/m12-workload.js" }
+      ]
+    },
+    {
+      "id": "load-rate-limited-hot",
+      "category": "load",
+      "criterion": "A rate-limited hot destination is measured alongside a healthy destination.",
+      "state": "verified-local",
+      "evidence": [
+        { "kind": "script", "path": "scripts/verify-local-platform.mjs" },
+        { "kind": "workload", "path": "scripts/load/m12-workload.js" }
+      ]
+    },
+    {
+      "id": "load-concurrent-search",
+      "category": "load",
+      "criterion": "Search p95 is measured while delivery backlog grows.",
+      "state": "verified-local",
+      "evidence": [
+        { "kind": "script", "path": "scripts/verify-local-platform.mjs" },
+        { "kind": "report", "path": "docs/m12-local-load-report.md" }
+      ]
+    },
+
+    {
+      "id": "restore-drill",
+      "category": "recovery",
+      "criterion": "Backup checksum, isolated restore, alias rebind, integrity checks, signed event, RPO, and RTO are measured.",
+      "state": "verified-local",
+      "evidence": [
+        { "kind": "script", "path": "scripts/restore-drill.mjs" },
+        { "kind": "test", "path": "tests/m12/recovery.test.ts" }
+      ]
+    },
+    {
+      "id": "runbook-partner-outage",
+      "category": "runbook",
+      "criterion": "Partner-outage response is documented and locally exercised.",
+      "state": "verified-local",
+      "evidence": [
+        { "kind": "runbook", "path": "docs/runbooks/partner-outage.md" }
+      ]
+    },
+    {
+      "id": "runbook-invalid-credentials",
+      "category": "runbook",
+      "criterion": "Invalid-credentials response is documented and locally exercised.",
+      "state": "verified-local",
+      "evidence": [
+        { "kind": "runbook", "path": "docs/runbooks/invalid-credentials.md" }
+      ]
+    },
+    {
+      "id": "runbook-growing-delivery-queue",
+      "category": "runbook",
+      "criterion": "Growing-delivery-queue response is documented and locally exercised.",
+      "state": "verified-local",
+      "evidence": [
+        { "kind": "runbook", "path": "docs/runbooks/growing-delivery-queue.md" }
+      ]
+    },
+    {
+      "id": "runbook-infrastructure-dlq",
+      "category": "runbook",
+      "criterion": "Infrastructure-DLQ response is documented and locally exercised.",
+      "state": "verified-local",
+      "evidence": [
+        { "kind": "runbook", "path": "docs/runbooks/infrastructure-dlq.md" }
+      ]
+    },
+    {
+      "id": "runbook-stuck-outbox",
+      "category": "runbook",
+      "criterion": "Stuck-outbox response is documented and locally exercised.",
+      "state": "verified-local",
+      "evidence": [
+        { "kind": "runbook", "path": "docs/runbooks/stuck-outbox.md" }
+      ]
+    },
+    {
+      "id": "runbook-restore",
+      "category": "runbook",
+      "criterion": "Restore response is documented and locally exercised.",
+      "state": "verified-local",
+      "evidence": [
+        { "kind": "runbook", "path": "docs/runbooks/restore.md" },
+        { "kind": "script", "path": "scripts/restore-drill.mjs" }
+      ]
+    },
+
+    {
+      "id": "accept-authenticated-event-submission",
+      "category": "tadd-acceptance",
+      "criterion": "Authenticated event submission.",
+      "state": "verified-local",
+      "evidence": [{ "kind": "script", "path": "scripts/demo-m04.mjs" }]
+    },
+    {
+      "id": "accept-duplicate-key",
+      "category": "tadd-acceptance",
+      "criterion": "Duplicate key does not duplicate event.",
+      "state": "verified-local",
+      "evidence": [
+        { "kind": "test", "path": "tests/integration/m02.integration.test.ts" }
+      ]
+    },
+    {
+      "id": "accept-two-destinations",
+      "category": "tadd-acceptance",
+      "criterion": "Two seeded destinations receive an event.",
+      "state": "verified-local",
+      "evidence": [{ "kind": "script", "path": "scripts/demo-m04.mjs" }]
+    },
+    {
+      "id": "accept-correct-transformations",
+      "category": "tadd-acceptance",
+      "criterion": "Correct partner transformations.",
+      "state": "verified-local",
+      "evidence": [
+        { "kind": "test", "path": "tests/domain/transformation.test.ts" },
+        { "kind": "test", "path": "tests/contracts/contracts.test.ts" }
+      ]
+    },
+    {
+      "id": "accept-api-key-and-oauth",
+      "category": "tadd-acceptance",
+      "criterion": "API key and OAuth client credentials work.",
+      "state": "verified-local",
+      "evidence": [
+        { "kind": "test", "path": "tests/contracts/mock-partners.test.ts" }
+      ]
+    },
+    {
+      "id": "accept-asynchronous-processing",
+      "category": "tadd-acceptance",
+      "criterion": "HTTP acceptance precedes partner call.",
+      "state": "verified-local",
+      "evidence": [
+        { "kind": "script", "path": "scripts/verify-local-platform.mjs" }
+      ]
+    },
+    {
+      "id": "accept-retry-with-jitter",
+      "category": "tadd-acceptance",
+      "criterion": "Retry policy uses deterministic jitter.",
+      "state": "verified-local",
+      "evidence": [
+        { "kind": "test", "path": "tests/domain/domain.test.ts" },
+        { "kind": "script", "path": "scripts/demo-m05.mjs" }
+      ]
+    },
+    {
+      "id": "accept-no-infinite-retry",
+      "category": "tadd-acceptance",
+      "criterion": "Retry exhaustion reaches a terminal dead-letter state.",
+      "state": "verified-local",
+      "evidence": [
+        { "kind": "test", "path": "tests/domain/domain.test.ts" },
+        { "kind": "script", "path": "scripts/demo-m06.mjs" }
+      ]
+    },
+    {
+      "id": "accept-rate-limit",
+      "category": "tadd-acceptance",
+      "criterion": "Rate limit is conditionally safe across workers.",
+      "state": "verified-local",
+      "evidence": [{ "kind": "test", "path": "tests/m12/concurrency.test.ts" }]
+    },
+    {
+      "id": "accept-circuit-behavior",
+      "category": "tadd-acceptance",
+      "criterion": "Circuit behavior is conditionally safe across competing probes.",
+      "state": "verified-local",
+      "evidence": [{ "kind": "test", "path": "tests/m12/concurrency.test.ts" }]
+    },
+    {
+      "id": "accept-product-dead-letter",
+      "category": "tadd-acceptance",
+      "criterion": "Product dead-lettering is demonstrated end to end.",
+      "state": "verified-local",
+      "evidence": [{ "kind": "script", "path": "scripts/demo-m06.mjs" }]
+    },
+    {
+      "id": "accept-authorized-replay",
+      "category": "tadd-acceptance",
+      "criterion": "Authorized operator replay succeeds through the UI.",
+      "state": "verified-local",
+      "evidence": [{ "kind": "test", "path": "tests/e2e/console.spec.ts" }]
+    },
+    {
+      "id": "accept-unauthorized-replay",
+      "category": "tadd-acceptance",
+      "criterion": "Unauthorized replay is rejected.",
+      "state": "verified-local",
+      "evidence": [
+        { "kind": "test", "path": "tests/e2e/console.spec.ts" },
+        { "kind": "test", "path": "tests/api/api.test.ts" }
+      ]
+    },
+    {
+      "id": "accept-original-history-immutable",
+      "category": "tadd-acceptance",
+      "criterion": "Original delivery/event history remains immutable after replay.",
+      "state": "verified-local",
+      "evidence": [
+        { "kind": "test", "path": "tests/e2e/console.spec.ts" },
+        { "kind": "test", "path": "tests/integration/m02.integration.test.ts" }
+      ]
+    },
+    {
+      "id": "accept-search-by-correlation",
+      "category": "tadd-acceptance",
+      "criterion": "Search by correlation identifier is tenant-authenticated.",
+      "state": "verified-local",
+      "evidence": [
+        { "kind": "test", "path": "tests/api/api.test.ts" },
+        { "kind": "test", "path": "tests/integration/m02.integration.test.ts" }
+      ]
+    },
+    {
+      "id": "accept-secrets-redacted",
+      "category": "tadd-acceptance",
+      "criterion": "Secrets are redacted from logs and UI/API surfaces.",
+      "state": "verified-local",
+      "evidence": [
+        { "kind": "test", "path": "tests/security/redaction.test.ts" },
+        { "kind": "test", "path": "tests/e2e/console.spec.ts" }
+      ]
+    },
+    {
+      "id": "accept-cross-tenant-denial",
+      "category": "tadd-acceptance",
+      "criterion": "Cross-tenant access is denied.",
+      "state": "verified-local",
+      "evidence": [
+        { "kind": "test", "path": "tests/e2e/console.spec.ts" },
+        { "kind": "test", "path": "tests/security/auth.test.ts" }
+      ]
+    },
+    {
+      "id": "accept-logs-metrics-traces",
+      "category": "tadd-acceptance",
+      "criterion": "Logs, metrics, and traces are proven locally and await a matching deployed hosted smoke.",
+      "state": "pending-deployment",
+      "evidence": [
+        { "kind": "script", "path": "scripts/demo-m07.mjs" },
+        { "kind": "script", "path": "scripts/smoke-hosted.mjs" }
+      ]
+    },
+    {
+      "id": "accept-ci-test-suites",
+      "category": "tadd-acceptance",
+      "criterion": "Protected-branch CI suites are defined and await a fresh PR run.",
+      "state": "pending-ci",
+      "evidence": [
+        { "kind": "workflow", "path": ".github/workflows/pull-request.yml" },
+        {
+          "kind": "workflow",
+          "path": ".github/workflows/deep-verification.yml"
+        }
+      ]
+    },
+    {
+      "id": "accept-local-documented-startup",
+      "category": "tadd-acceptance",
+      "criterion": "Documented local startup is exercised by the Compose verifier.",
+      "state": "verified-local",
+      "evidence": [
+        { "kind": "script", "path": "scripts/verify-local-platform.mjs" },
+        { "kind": "test", "path": "tests/ci/local-scripts.test.ts" }
+      ]
+    },
+    {
+      "id": "accept-automated-deployment",
+      "category": "tadd-acceptance",
+      "criterion": "Automated deployment is defined and awaits a post-merge run.",
+      "state": "pending-deployment",
+      "evidence": [
+        { "kind": "workflow", "path": ".github/workflows/deploy-demo.yml" }
+      ]
+    },
+    {
+      "id": "accept-no-manual-db-edits",
+      "category": "tadd-acceptance",
+      "criterion": "The recorded demo script requires no manual database edits.",
+      "state": "verified-local",
+      "evidence": [
+        { "kind": "script", "path": "scripts/demo-m04.mjs" },
+        { "kind": "readme", "path": "README.md" }
+      ]
+    },
+    {
+      "id": "accept-configuration-portability",
+      "category": "tadd-acceptance",
+      "criterion": "Configuration export/plan/apply excludes secret values.",
+      "state": "verified-local",
+      "evidence": [
+        { "kind": "test", "path": "tests/config-portability.test.ts" },
+        { "kind": "test", "path": "tests/integration/m02.integration.test.ts" }
+      ]
+    },
+    {
+      "id": "accept-hybrid-development",
+      "category": "tadd-acceptance",
+      "criterion": "Hybrid startup attestation and IAM denial against shared resources pass using the non-root development role.",
+      "state": "verified-hosted",
+      "evidence": [
+        { "kind": "script", "path": "scripts/smoke-hybrid.mjs" },
+        { "kind": "test", "path": "tests/config/hybrid.test.ts" }
+      ]
+    },
+
+    {
+      "id": "m12-adr-reconciliation",
+      "category": "governance",
       "criterion": "ADR-001 through ADR-031 implementation evidence is reconciled and recovery semantics are governed by ADR-031.",
-      "verification": "decisions/ADR-INDEX.md decisions/ADR-031-recovery-snapshot-and-isolated-restore.md"
+      "state": "verified-local",
+      "evidence": [
+        { "kind": "adr-index", "path": "decisions/ADR-INDEX.md" },
+        {
+          "kind": "adr",
+          "path": "decisions/ADR-031-recovery-snapshot-and-isolated-restore.md"
+        }
+      ]
     },
     {
-      "id": "operator-documentation",
-      "criterion": "README documents final demo, recovery, load, runbook, and deep-verification commands.",
-      "verification": "README.md docs/runbooks"
-    },
-    {
-      "id": "handoff",
-      "criterion": "The M12 handoff reports actual repository, test, hosted, CI, ADR, and generated-artifact state without claiming unavailable external gates.",
-      "verification": "implementation/handoffs/M12-handoff.md implementation/MILESTONE-HANDOFF-TEMPLATE.md"
+      "id": "m12-handoff",
+      "category": "governance",
+      "criterion": "Handoff discloses verified repository, local, hosted, CI, and generated-artifact state.",
+      "state": "verified-local",
+      "evidence": [
+        { "kind": "handoff", "path": "implementation/handoffs/M12-handoff.md" }
+      ]
     }
   ]
 }

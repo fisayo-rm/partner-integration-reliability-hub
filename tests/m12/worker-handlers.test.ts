@@ -81,3 +81,37 @@ test("M12 injected routing and outbox failures report only failed batch records"
     },
   );
 });
+
+test("M12 delivery-handler fault injection keeps stale work acknowledged and retryable failures isolated", async () => {
+  const { delivery: deliveryModule } = await handlers();
+  const failures = [
+    "transient DynamoDB failure",
+    "transient SQS failure",
+    "OAuth timeout",
+    "partner timeout",
+    "missing secret",
+    "circuit finalization conflict",
+  ];
+  for (const failure of failures) {
+    const handler = deliveryModule.createSqsHandler({
+      deliver: async () => {
+        throw new Error(failure);
+      },
+      resume: async () => undefined,
+      flush: async () => undefined,
+    });
+    await expect(
+      handler({
+        Records: [{ messageId: failure, body: JSON.stringify(message) }],
+      }),
+    ).resolves.toEqual({ batchItemFailures: [{ itemIdentifier: failure }] });
+  }
+  const stale = deliveryModule.createSqsHandler({
+    deliver: async () => ({ acknowledge: true }),
+    resume: async () => undefined,
+    flush: async () => undefined,
+  });
+  await expect(
+    stale({ Records: [{ messageId: "stale", body: JSON.stringify(message) }] }),
+  ).resolves.toEqual({ batchItemFailures: [] });
+});

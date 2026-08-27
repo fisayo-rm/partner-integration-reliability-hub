@@ -12,18 +12,10 @@ x-placeholder: &placeholder
 services:
   dynamodb-local:
     image: amazon/dynamodb-local:2.5.2
-    # The fresh named volume is root-owned; DynamoDB Local must create its SQLite file.
-    user: "0:0"
-    command:
-      [
-        "-jar",
-        "DynamoDBLocal.jar",
-        "-sharedDb",
-        "-dbPath",
-        "/home/dynamodblocal/data",
-      ]
+    # Verification stacks are isolated and removed after every run. In-memory
+    # mode prevents host-volume SQLite latency from distorting the k6 gate.
+    command: ["-jar", "DynamoDBLocal.jar", "-inMemory", "-sharedDb"]
     working_dir: /home/dynamodblocal
-    volumes: ["dynamodb-data:/home/dynamodblocal/data"]
     ports: ["8000:8000"]
     healthcheck:
       test:
@@ -82,12 +74,12 @@ services:
       AWS_PAGER: ""
       DYNAMODB_ENDPOINT: http://dynamodb-local:8000
       ELASTICMQ_ENDPOINT: http://elasticmq:9324
-      CORE_TABLE_NAME: pirh-core-local
-      AUDIT_TABLE_NAME: pirh-audit-local
-      ROUTING_QUEUE_NAME: pirh-routing-local
-      ROUTING_DLQ_NAME: pirh-routing-infra-dlq-local
-      DELIVERY_QUEUE_NAME: pirh-delivery-local
-      DELIVERY_DLQ_NAME: pirh-delivery-infra-dlq-local
+      CORE_TABLE_NAME: ${CORE_TABLE_NAME:-pirh-core-local}
+      AUDIT_TABLE_NAME: ${AUDIT_TABLE_NAME:-pirh-audit-local}
+      ROUTING_QUEUE_NAME: ${ROUTING_QUEUE_NAME:-pirh-routing-local}
+      ROUTING_DLQ_NAME: ${ROUTING_DLQ_NAME:-pirh-routing-infra-dlq-local}
+      DELIVERY_QUEUE_NAME: ${DELIVERY_QUEUE_NAME:-pirh-delivery-local}
+      DELIVERY_DLQ_NAME: ${DELIVERY_DLQ_NAME:-pirh-delivery-infra-dlq-local}
     volumes: ["./infrastructure/docker/bootstrap:/bootstrap:ro"]
     entrypoint: ["/bin/sh", "/bootstrap/bootstrap.sh"]
 
@@ -102,8 +94,8 @@ services:
     environment:
       AWS_REGION: us-east-1
       DYNAMODB_ENDPOINT: http://dynamodb-local:8000
-      CORE_TABLE_NAME: pirh-core-local
-      AUDIT_TABLE_NAME: pirh-audit-local
+      CORE_TABLE_NAME: ${CORE_TABLE_NAME:-pirh-core-local}
+      AUDIT_TABLE_NAME: ${AUDIT_TABLE_NAME:-pirh-audit-local}
       OIDC_ISSUER: http://localhost:8080/realms/pirh-local
       LOCAL_SECRET_MASTER_KEY_B64: ${LOCAL_SECRET_MASTER_KEY_B64:-}
       LOCAL_SEED_PRODUCER_SECRET: ${LOCAL_SEED_PRODUCER_SECRET:-}
@@ -111,6 +103,7 @@ services:
       LOCAL_SEED_BETA_CLIENT_SECRET: ${LOCAL_SEED_BETA_CLIENT_SECRET:-}
       LOCAL_SEED_TARGET_ALPHA_API_KEY: ${LOCAL_SEED_TARGET_ALPHA_API_KEY:-}
       LOCAL_SEED_TARGET_BETA_CLIENT_SECRET: ${LOCAL_SEED_TARGET_BETA_CLIENT_SECRET:-}
+      LOCAL_SEED_MODE: ${LOCAL_SEED_MODE:-full}
 
   api:
     image: pirh-m01-node:local
@@ -125,8 +118,8 @@ services:
       API_PORT: "3000"
       DYNAMODB_ENDPOINT: http://dynamodb-local:8000
       ELASTICMQ_ENDPOINT: http://elasticmq:9324
-      CORE_TABLE_NAME: pirh-core-local
-      AUDIT_TABLE_NAME: pirh-audit-local
+      CORE_TABLE_NAME: ${CORE_TABLE_NAME:-pirh-core-local}
+      AUDIT_TABLE_NAME: ${AUDIT_TABLE_NAME:-pirh-audit-local}
       OIDC_ISSUER: http://localhost:8080/realms/pirh-local
       OIDC_JWKS_URI: http://keycloak:8080/realms/pirh-local/protocol/openid-connect/certs
       OIDC_AUDIENCE: pirh-console
@@ -176,10 +169,10 @@ services:
       AWS_REGION: us-east-1
       DYNAMODB_ENDPOINT: http://dynamodb-local:8000
       ELASTICMQ_ENDPOINT: http://elasticmq:9324
-      CORE_TABLE_NAME: pirh-core-local
-      AUDIT_TABLE_NAME: pirh-audit-local
-      ROUTING_QUEUE_NAME: pirh-routing-local
-      DELIVERY_QUEUE_NAME: pirh-delivery-local
+      CORE_TABLE_NAME: ${CORE_TABLE_NAME:-pirh-core-local}
+      AUDIT_TABLE_NAME: ${AUDIT_TABLE_NAME:-pirh-audit-local}
+      ROUTING_QUEUE_NAME: ${ROUTING_QUEUE_NAME:-pirh-routing-local}
+      DELIVERY_QUEUE_NAME: ${DELIVERY_QUEUE_NAME:-pirh-delivery-local}
       APP_ENV: local
       PIRH_OTLP_ENDPOINT: ${PIRH_OTLP_ENDPOINT:-}
       LOG_LEVEL: ${LOG_LEVEL:-info}
@@ -193,9 +186,9 @@ services:
       AWS_REGION: us-east-1
       DYNAMODB_ENDPOINT: http://dynamodb-local:8000
       ELASTICMQ_ENDPOINT: http://elasticmq:9324
-      CORE_TABLE_NAME: pirh-core-local
-      AUDIT_TABLE_NAME: pirh-audit-local
-      ROUTING_QUEUE_NAME: pirh-routing-local
+      CORE_TABLE_NAME: ${CORE_TABLE_NAME:-pirh-core-local}
+      AUDIT_TABLE_NAME: ${AUDIT_TABLE_NAME:-pirh-audit-local}
+      ROUTING_QUEUE_NAME: ${ROUTING_QUEUE_NAME:-pirh-routing-local}
       APP_ENV: local
       PIRH_OTLP_ENDPOINT: ${PIRH_OTLP_ENDPOINT:-}
       LOG_LEVEL: ${LOG_LEVEL:-info}
@@ -212,9 +205,9 @@ services:
       AWS_REGION: us-east-1
       DYNAMODB_ENDPOINT: http://dynamodb-local:8000
       ELASTICMQ_ENDPOINT: http://elasticmq:9324
-      CORE_TABLE_NAME: pirh-core-local
-      AUDIT_TABLE_NAME: pirh-audit-local
-      DELIVERY_QUEUE_NAME: pirh-delivery-local
+      CORE_TABLE_NAME: ${CORE_TABLE_NAME:-pirh-core-local}
+      AUDIT_TABLE_NAME: ${AUDIT_TABLE_NAME:-pirh-audit-local}
+      DELIVERY_QUEUE_NAME: ${DELIVERY_QUEUE_NAME:-pirh-delivery-local}
       LOCAL_SECRET_MASTER_KEY_B64: ${LOCAL_SECRET_MASTER_KEY_B64:-}
       APP_ENV: local
       PIRH_OTLP_ENDPOINT: ${PIRH_OTLP_ENDPOINT:-}
@@ -229,10 +222,10 @@ services:
       AWS_REGION: us-east-1
       DYNAMODB_ENDPOINT: http://dynamodb-local:8000
       ELASTICMQ_ENDPOINT: http://elasticmq:9324
-      CORE_TABLE_NAME: pirh-core-local
-      AUDIT_TABLE_NAME: pirh-audit-local
-      ROUTING_QUEUE_NAME: pirh-routing-local
-      DELIVERY_QUEUE_NAME: pirh-delivery-local
+      CORE_TABLE_NAME: ${CORE_TABLE_NAME:-pirh-core-local}
+      AUDIT_TABLE_NAME: ${AUDIT_TABLE_NAME:-pirh-audit-local}
+      ROUTING_QUEUE_NAME: ${ROUTING_QUEUE_NAME:-pirh-routing-local}
+      DELIVERY_QUEUE_NAME: ${DELIVERY_QUEUE_NAME:-pirh-delivery-local}
       APP_ENV: local
       PIRH_OTLP_ENDPOINT: ${PIRH_OTLP_ENDPOINT:-}
       LOG_LEVEL: ${LOG_LEVEL:-info}
@@ -329,13 +322,12 @@ services:
     image: grafana/k6:0.57.0
     profiles: ["load"]
     working_dir: /work
-    volumes: ["./scripts/load:/work:ro", "./load-artifacts:/artifacts"]
+    volumes: ["./scripts/load:/work:ro"]
     environment:
       PIRH_LOAD_BASE_URL: http://api:3000
-      K6_SUMMARY_EXPORT: /artifacts/summary.json
-      K6_SCENARIO: ${K6_SCENARIO:-one-destination}
-      K6_RATE: ${K6_RATE:-100}
-      K6_DURATION: ${K6_DURATION:-60s}
+      PIRH_LOAD_SCENARIO: ${PIRH_LOAD_SCENARIO:-one-destination}
+      PIRH_K6_RATE: ${PIRH_K6_RATE:-100}
+      PIRH_K6_DURATION: ${PIRH_K6_DURATION:-60s}
       LOCAL_DEMO_CLIENT_ID: ${LOCAL_DEMO_CLIENT_ID:-cli_01J0A1B2C3D4E5F6G7H8J9K0MN}
       LOCAL_SEED_PRODUCER_SECRET: ${LOCAL_SEED_PRODUCER_SECRET:-}
     command: ["run", "/work/m12-workload.js"]

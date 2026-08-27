@@ -134,18 +134,23 @@ tables. They never read local secret values and reject secret-shaped content.
 pnpm ops:backup --environment local --tenant tenant_01J0A1B2C3D4E5F6G7H8J9K0MN --output backups/demo
 pnpm ops:restore --source backups/demo/manifest.v1.json --target-environment restore-test \
   --core-table pirh-restore-core --audit-table pirh-restore-audit --allow-restore
+# Full isolated backup, restore, alias-rebind, and signed-event drill.
+pnpm restore:drill
 
 # From an already-running, isolated local Compose environment.
-K6_SCENARIO=one-destination K6_RATE=100 K6_DURATION=60s pnpm load:run
+PIRH_LOAD_SCENARIO=one-destination PIRH_K6_RATE=100 PIRH_K6_DURATION=60s pnpm load:run
+# Fresh all-scenario resilience gate (it provisions and removes its own stack).
+pnpm local:verify:deep
 pnpm acceptance:validate
 ```
 
 The k6 profile uses an open constant-arrival-rate executor and writes only ignored
-machine-readable artifacts to `load-artifacts/`. Run all named scenarios through
-the scheduled or manual **Deep verification** workflow. Its report must include the
+machine-readable artifacts to `load-artifacts/`. Run all named scenarios with
+`pnpm local:verify:deep` or the scheduled/manual **Deep verification** workflow.
+The checked-in [M12 local load report](docs/m12-local-load-report.md) records the
 environment, payload size, warm-up and duration, accepted rate, queue depth,
-latencies, retries, versions, resource limits, and emulator limitations before any
-100 events/second claim is made. Hosted performance remains optional under ADR-021.
+latencies, retries, versions, resource limits, and emulator limitations. Hosted
+performance remains optional under ADR-021.
 
 Runbooks for partner outage, invalid credentials, growing delivery queue,
 infrastructure DLQ, stuck outbox, and restore are in `docs/runbooks/`. They are

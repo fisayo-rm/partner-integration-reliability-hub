@@ -81,11 +81,15 @@ const parameter = async (name) => {
     throw new Error(`Required parameter ${name} is unavailable.`);
   return result.Parameter.Value;
 };
+// CI may inject these values through its secret runtime. Local inspection runs
+// must not retrieve plaintext values themselves; use pre-injected values instead.
 const [producerSecret, controlToken] = await Promise.all([
-  parameter(
-    "/pirh/demo/tenants/tenant_01J0A1B2C3D4E5F6G7H8J9K0MN/secrets/producer-current",
-  ),
-  parameter("/pirh/demo/system/mock-control-token"),
+  process.env.HOSTED_PRODUCER_SECRET ??
+    parameter(
+      "/pirh/demo/tenants/tenant_01J0A1B2C3D4E5F6G7H8J9K0MN/secrets/producer-current",
+    ),
+  process.env.HOSTED_MOCK_CONTROL_TOKEN ??
+    parameter("/pirh/demo/system/mock-control-token"),
 ]);
 const body = Buffer.from(
   JSON.stringify({

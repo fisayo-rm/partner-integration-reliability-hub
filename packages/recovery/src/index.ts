@@ -31,7 +31,46 @@ const localSecretTypes = new Set(["LOCAL_SECRET", "LOCAL_SECRET_HEAD"]);
 const credentialKey =
   /(secret|password|access[_-]?token|refresh[_-]?token|private[_-]?key|api[_-]?key)/i;
 const referenceKey =
-  /(?:secretReference|secretReferenceNames|secretName|secretId|parameterName)/i;
+  /(?:secretReference|secretReferenceNames|secretName|secretId|secretVersions?|parameterName)/i;
+
+function hasOnlyRedactedSensitiveHeaders(value: unknown): boolean {
+  if (value === null || typeof value !== "object" || Array.isArray(value))
+    return false;
+  return Object.entries(value as Item).every(
+    ([name, headerValue]) =>
+      typeof headerValue === "string" &&
+      (!credentialKey.test(name) || headerValue === "[REDACTED]"),
+  );
+}
+
+function hasOnlyLogicalSecretVersions(value: unknown): boolean {
+  return (
+    Array.isArray(value) &&
+    value.every((entry) => {
+      if (entry === null || typeof entry !== "object" || Array.isArray(entry))
+        return false;
+      const record = entry as Item;
+      const reference = record.reference;
+      return (
+        reference !== null &&
+        typeof reference === "object" &&
+        !Array.isArray(reference) &&
+        Object.keys(record).every((key) =>
+          ["reference", "state", "activatedAt", "graceExpiresAt"].includes(key),
+        ) &&
+        Object.keys(reference as Item).every((key) =>
+          ["name", "version"].includes(key),
+        ) &&
+        typeof (reference as Item).name === "string" &&
+        typeof (reference as Item).version === "string" &&
+        (record.state === "active" || record.state === "grace") &&
+        typeof record.activatedAt === "string" &&
+        (record.graceExpiresAt === undefined ||
+          typeof record.graceExpiresAt === "string")
+      );
+    })
+  );
+}
 
 function stable(value: unknown): string {
   if (value === null || typeof value !== "object") return JSON.stringify(value);
@@ -54,6 +93,18 @@ function assertSnapshotSafe(value: unknown, path = "$"): void {
   }
   if (value === null || typeof value !== "object") return;
   for (const [key, child] of Object.entries(value as Item)) {
+    if (
+      /^requestHeadersRedacted$/i.test(key) &&
+      hasOnlyRedactedSensitiveHeaders(child)
+    )
+      continue;
+    if (/^secretVersions?$/i.test(key)) {
+      if (!hasOnlyLogicalSecretVersions(child))
+        throw new Error(
+          `Recovery snapshot refused malformed logical secret versions at ${path}.${key}.`,
+        );
+      continue;
+    }
     if (credentialKey.test(key) && !referenceKey.test(key))
       throw new Error(
         `Recovery snapshot refused credential-shaped field ${path}.${key}.`,

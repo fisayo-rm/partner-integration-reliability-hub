@@ -42,10 +42,17 @@ export async function loadHybridRuntimeEnvironment() {
   )
     throw new Error("Hybrid developer role credentials are unavailable.");
   const issuer = required("CognitoIssuer");
+  // The initial CloudFormation/STS clients may use AWS_PROFILE to assume the
+  // dedicated developer role. Child application processes must use only those
+  // assumed credentials; leaving the bootstrap profile in place makes the SDK
+  // select the wrong identity and defeats the hybrid attestation.
+  const runtimeBaseEnvironment = { ...process.env };
+  delete runtimeBaseEnvironment.AWS_PROFILE;
+  delete runtimeBaseEnvironment.AWS_DEFAULT_PROFILE;
   return {
     outputs,
     environment: {
-      ...process.env,
+      ...runtimeBaseEnvironment,
       APP_ENV: "hybrid",
       AWS_REGION: hybridRegion,
       AWS_ACCOUNT_ID: hybridAccountId,

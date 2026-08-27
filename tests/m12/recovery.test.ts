@@ -1,6 +1,7 @@
 import { mkdtemp, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { gunzipSync } from "node:zlib";
 import { expect, test } from "vitest";
 import { DynamoPersistence } from "../../packages/persistence/src/index.js";
 import {
@@ -180,6 +181,78 @@ test("M12 backup is tenant-scoped, omits local secrets, and writes a manifest ch
       kind: "pirh-recovery-snapshot",
       tenantId,
     });
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("M12 backup retains tenant-owned lookup, idempotency, outbox, scheduled, and runtime records", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "pirh-m12-recovery-state-"));
+  try {
+    const tenantPrefix = `TENANT#${tenantId}`;
+    const sourceItems = [
+      {
+        PK: tenantPrefix,
+        SK: "META",
+        tenantId,
+        entityType: "TENANT",
+        secretVersions: [
+          {
+            reference: { name: "alpha-api-key", version: "v1" },
+            state: "active",
+            activatedAt: "2026-08-26T00:00:00.000Z",
+          },
+        ],
+      },
+      { PK: `${tenantPrefix}#LOOKUP`, SK: "EVENT#evt", entityType: "LOOKUP" },
+      {
+        PK: `${tenantPrefix}#IDEMPOTENCY#client`,
+        SK: "KEY#hash",
+        entityType: "IDEMPOTENCY",
+      },
+      {
+        PK: "OUTBOX#1",
+        SK: "2026-08-26#obx",
+        tenantId,
+        entityType: "OUTBOX",
+      },
+      {
+        PK: "SCHEDULED_WORK#1",
+        SK: "2026-08-26#work",
+        tenantId,
+        entityType: "SCHEDULED_WORK",
+      },
+      {
+        PK: `${tenantPrefix}#DESTINATION#dst`,
+        SK: "RUNTIME#CIRCUIT",
+        entityType: "RUNTIME",
+      },
+      {
+        PK: `${tenantPrefix}#EVENT#evt`,
+        SK: "DELIVERY#dlv#ATTEMPT#00000001",
+        entityType: "DELIVERY_ATTEMPT",
+        requestHeadersRedacted: { "X-API-Key": "[REDACTED]" },
+      },
+    ];
+    const result = await createBackup({
+      client: {
+        send: async (command: { input: { TableName?: string } }) =>
+          command.input.TableName === "core"
+            ? { Items: sourceItems }
+            : { Items: [] },
+      } as never,
+      environment: "local",
+      tenantId,
+      outputDirectory: directory,
+      coreTableName: "core",
+      auditTableName: "audit",
+    });
+    const content = gunzipSync(
+      await readFile(join(directory, result.manifest.files.core.file)),
+    ).toString("utf8");
+    expect(result.manifest.files.core.recordCount).toBe(sourceItems.length);
+    for (const item of sourceItems)
+      expect(content).toContain(`"SK":"${item.SK}"`);
   } finally {
     await rm(directory, { recursive: true, force: true });
   }

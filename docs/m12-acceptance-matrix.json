@@ -3,32 +3,104 @@
   "milestone": "M12",
   "rows": [
     {
-      "criterion": "Started-attempt lease recovery records immutable timeout evidence",
+      "id": "lease-recovery",
+      "criterion": "Started-attempt lease recovery records one immutable timeout, creates normal retry work, and prevents a late worker outcome.",
       "verification": "tests/m12/recovery.test.ts"
     },
     {
-      "criterion": "Recovery snapshots exclude secrets and restore targets fail closed",
-      "verification": "tests/m12/recovery.test.ts"
+      "id": "concurrency-races",
+      "criterion": "Required ingestion, worker, publication, circuit, rate, replay, and expired-lease races remain conditionally safe.",
+      "verification": "tests/integration/m02.integration.test.ts tests/m12/recovery.test.ts"
     },
     {
-      "criterion": "Default and observability local profiles",
-      "verification": "pnpm local:verify:default && pnpm local:verify:observability"
+      "id": "fault-isolation",
+      "criterion": "Injected worker paths isolate malformed, stale, transient queue, OAuth, partner timeout, missing-secret, disable, and finalization-conflict failures.",
+      "verification": "tests/m12/worker-handlers.test.ts"
     },
     {
-      "criterion": "Seven controlled load scenarios and 100/s benchmark",
-      "verification": "pnpm load:run"
+      "id": "recovery-contract",
+      "criterion": "BackupManifestV1 is deterministic, tenant-scoped, preserves durable tenant state, and excludes credential-shaped or local-secret records.",
+      "verification": "packages/recovery/src/index.ts tests/m12/recovery.test.ts"
     },
     {
-      "criterion": "Hosted trace, metric, log, dashboard and alarm smoke",
-      "verification": "pnpm smoke:hosted"
+      "id": "isolated-restore",
+      "criterion": "Restore verifies checksums and safety invariants, requires an empty restore-test target, rebinds local aliases, and accepts a post-restore signed event.",
+      "verification": "scripts/restore-drill.mjs tests/m12/recovery.test.ts"
     },
     {
-      "criterion": "Infrastructure and hybrid synthesis",
-      "verification": "pnpm cdk:synth && pnpm hybrid:synth"
+      "id": "observability-runtime",
+      "criterion": "Manual telemetry propagates business traces, flushes invocation telemetry, and supports hosted CloudWatch/X-Ray export.",
+      "verification": "packages/observability/src/index.ts infrastructure/cdk/lib"
     },
     {
-      "criterion": "PR and deep verification workflows",
-      "verification": ".github/workflows/pull-request.yml && .github/workflows/deep-verification.yml"
+      "id": "hosted-observability",
+      "criterion": "Hosted smoke checks correlated logs, application/native metrics, trace stages, dashboard/alarms, and secret-safe evidence.",
+      "verification": "scripts/smoke-hosted.mjs"
+    },
+    {
+      "id": "local-profiles",
+      "criterion": "Default and observability Compose profiles exercise integration demos, acceptance ordering, E2E, and local telemetry.",
+      "verification": "scripts/verify-local-platform.mjs scripts/demo-m07.mjs tests/e2e/console.spec.ts"
+    },
+    {
+      "id": "ui-replay",
+      "criterion": "Authorized UI replay succeeds while viewer and cross-tenant access are denied and original history remains immutable.",
+      "verification": "tests/e2e/console.spec.ts"
+    },
+    {
+      "id": "acceptance-before-call",
+      "criterion": "A durable HTTP 202 acceptance precedes any partner call while publication is paused.",
+      "verification": "scripts/verify-local-platform.mjs"
+    },
+    {
+      "id": "load-scenarios",
+      "criterion": "All seven isolated k6 scenarios use signed constant-arrival-rate workload and the primary gate proves 100 accepted events per second.",
+      "verification": "scripts/load/m12-workload.js scripts/verify-local-platform.mjs docs/m12-local-load-report.md"
+    },
+    {
+      "id": "load-artifacts",
+      "criterion": "Measured report records environment, workload, queue, latency, retries, destination, and emulator limits without retaining generated artifacts.",
+      "verification": "docs/m12-local-load-report.md scripts/verify-local-platform.mjs"
+    },
+    {
+      "id": "runbooks",
+      "criterion": "Partner outage, credentials, delivery backlog, DLQ, stuck outbox, and restore runbooks contain evidence, safe/unsafe actions, verification, and exercise results.",
+      "verification": "docs/runbooks scripts/restore-drill.mjs"
+    },
+    {
+      "id": "ci-gates",
+      "criterion": "PR engineering gate retains fast resilience/matrix checks and deep verification is scheduled/manual with evidence upload.",
+      "verification": ".github/workflows/pull-request.yml .github/workflows/deep-verification.yml"
+    },
+    {
+      "id": "infrastructure-synthesis",
+      "criterion": "Hosted and hybrid infrastructure synthesize with the M12 telemetry and recovery changes.",
+      "verification": "infrastructure/cdk package.json"
+    },
+    {
+      "id": "hosted-functional",
+      "criterion": "Hosted functional and observability smoke are explicit post-deployment acceptance evidence.",
+      "verification": "scripts/smoke-hosted.mjs package.json"
+    },
+    {
+      "id": "hybrid-safety",
+      "criterion": "Hybrid smoke and IAM-denial proof remain an explicit non-root verification step.",
+      "verification": "scripts/smoke-hybrid.mjs tests/config/hybrid.test.ts"
+    },
+    {
+      "id": "adr-reconciliation",
+      "criterion": "ADR-001 through ADR-031 implementation evidence is reconciled and recovery semantics are governed by ADR-031.",
+      "verification": "decisions/ADR-INDEX.md decisions/ADR-031-recovery-snapshot-and-isolated-restore.md"
+    },
+    {
+      "id": "operator-documentation",
+      "criterion": "README documents final demo, recovery, load, runbook, and deep-verification commands.",
+      "verification": "README.md docs/runbooks"
+    },
+    {
+      "id": "handoff",
+      "criterion": "The M12 handoff reports actual repository, test, hosted, CI, ADR, and generated-artifact state without claiming unavailable external gates.",
+      "verification": "implementation/handoffs/M12-handoff.md implementation/MILESTONE-HANDOFF-TEMPLATE.md"
     }
   ]
 }

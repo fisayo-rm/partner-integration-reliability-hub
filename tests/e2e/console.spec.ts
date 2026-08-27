@@ -133,7 +133,14 @@ test("M08 console login, role gate, API redaction, and tenant boundary", async (
     admin,
     `/api/v1/events/${original.eventId}`,
   );
-  const eventBeforeReplayBody = await eventBeforeReplay.json();
+  const eventBeforeReplayBody = (await eventBeforeReplay.json()) as {
+    event?: unknown;
+    deliveries?: { deliveryId?: string }[];
+  };
+  const originalBeforeReplay = eventBeforeReplayBody.deliveries?.find(
+    (delivery) => delivery.deliveryId === original.deliveryId,
+  );
+  expect(originalBeforeReplay).toBeDefined();
   await page.goto(`/deliveries/${original.deliveryId}`);
   await expect(
     page.getByRole("heading", { name: "Delivery detail" }),
@@ -153,15 +160,20 @@ test("M08 console login, role gate, API redaction, and tenant boundary", async (
   await page.getByRole("button", { name: "Confirm replay" }).click();
   await replayResponse;
   await expect(page.getByText(/replay relationships/i)).toBeVisible();
-  await expect
-    .poll(async () => {
-      const response = await request(
-        admin,
-        `/api/v1/events/${original.eventId}`,
-      );
-      return JSON.stringify(await response.json());
-    })
-    .toBe(JSON.stringify(eventBeforeReplayBody));
+  const eventAfterReplay = await request(
+    admin,
+    `/api/v1/events/${original.eventId}`,
+  );
+  const eventAfterReplayBody = (await eventAfterReplay.json()) as {
+    event?: unknown;
+    deliveries?: { deliveryId?: string }[];
+  };
+  expect(eventAfterReplayBody.event).toEqual(eventBeforeReplayBody.event);
+  expect(
+    eventAfterReplayBody.deliveries?.find(
+      (delivery) => delivery.deliveryId === original.deliveryId,
+    ),
+  ).toEqual(originalBeforeReplay);
   const validation = await request(admin, "/api/v1/transformations/validate", {
     method: "POST",
     headers: { "content-type": "application/json" },

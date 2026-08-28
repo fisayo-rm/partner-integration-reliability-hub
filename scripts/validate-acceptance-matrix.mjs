@@ -81,6 +81,10 @@ const permittedStates = new Set([
   "pending-ci",
   "pending-deployment",
 ]);
+// ADRs and milestone handoffs are intentionally local records and are not
+// versioned with the implementation repository. Their evidence remains declared
+// in the matrix, but CI can only require material that is present in its checkout.
+const localGovernanceEvidenceKinds = new Set(["adr-index", "adr", "handoff"]);
 
 if (
   matrix.version !== 2 ||
@@ -124,7 +128,8 @@ for (const row of matrix.rows) {
       evidence.path.includes("..")
     )
       throw new Error(`M12 acceptance row ${row.id} has invalid evidence.`);
-    await access(new URL(`../${evidence.path}`, import.meta.url));
+    if (!localGovernanceEvidenceKinds.has(evidence.kind))
+      await access(new URL(`../${evidence.path}`, import.meta.url));
   }
 }
 for (const id of requiredIds)

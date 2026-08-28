@@ -123,6 +123,40 @@ mutating anything, then refreshes it with the resulting plan. Omitted resources 
 not deleted or disabled; unresolved aliases and immutable-version changes are
 reported rather than forced.
 
+## Recovery, load, and final acceptance (M12)
+
+Recovery snapshots are distinct from configuration portability bundles: they retain
+one tenant's durable operational state for restoration only into fresh isolated
+tables. They never read local secret values and reject secret-shaped content.
+
+```bash
+# Local controlled recovery snapshot; output is intentionally gitignored.
+pnpm ops:backup --environment local --tenant tenant_01J0A1B2C3D4E5F6G7H8J9K0MN --output backups/demo
+pnpm ops:restore --source backups/demo/manifest.v1.json --target-environment restore-test \
+  --core-table pirh-restore-core --audit-table pirh-restore-audit --allow-restore
+# Full isolated backup, restore, alias-rebind, and signed-event drill.
+pnpm restore:drill
+
+# From an already-running, isolated local Compose environment.
+PIRH_LOAD_SCENARIO=one-destination PIRH_K6_RATE=100 PIRH_K6_DURATION=60s pnpm load:run
+# Fresh all-scenario resilience gate (it provisions and removes its own stack).
+pnpm local:verify:deep
+pnpm acceptance:validate
+```
+
+The k6 profile uses an open constant-arrival-rate executor and writes only ignored
+machine-readable artifacts to `load-artifacts/`. Run all named scenarios with
+`pnpm local:verify:deep` or the scheduled/manual **Deep verification** workflow.
+The checked-in [M12 local load report](docs/m12-local-load-report.md) records the
+environment, payload size, warm-up and duration, accepted rate, queue depth,
+latencies, retries, versions, resource limits, and emulator limitations. Hosted
+performance remains optional under ADR-021.
+
+Runbooks for partner outage, invalid credentials, growing delivery queue,
+infrastructure DLQ, stuck outbox, and restore are in `docs/runbooks/`. They are
+designed for evidence-first operation: never purge queues, mutate history, or copy
+secret values as a recovery shortcut.
+
 ## Repository boundaries
 
 - `apps/` contains runtime composition points only.
@@ -137,10 +171,13 @@ The demo targets `us-east-1` and uses GitHub OIDC rather than long-lived AWS key
 Before the first deployment, bootstrap the account, create the GitHub `demo`
 environment with required branch protection, and configure only the documented
 environment-scoped variables and secrets: account ID, deploy-role ARN, Pages project
-name, Cloudflare account/token, and three demo-user bootstrap passwords. Then run
-`pnpm --filter @pirh/cdk synth`, inspect `cdk diff`, and deploy through the protected
-main workflow. The workflow creates the Cloudflare Pages project if it does not exist,
-seeds non-source SSM values, deploys static console assets, and records rollback inputs.
+name, Cloudflare account/token, three demo-user bootstrap passwords, and the protected
+`HOSTED_PRODUCER_SECRET` and `HOSTED_MOCK_CONTROL_TOKEN` values used only by the hosted
+smoke. Then run `pnpm --filter @pirh/cdk synth`, inspect `cdk diff`, and deploy through
+the protected main workflow. The workflow creates the Cloudflare Pages project if it does
+not exist, seeds non-source SSM values, deploys static console assets, and records rollback
+inputs. Hosted smoke receives its secret values only from the protected GitHub environment;
+it never reads or decrypts them from AWS.
 
 Hosted rollback changes Lambda aliases and redeploys a recorded Pages artifact only;
 it never rewrites DynamoDB event, attempt, audit, or configuration history.

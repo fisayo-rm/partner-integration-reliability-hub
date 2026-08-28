@@ -18,7 +18,7 @@ import {
 
 const region = process.env.AWS_REGION ?? "us-east-1";
 const local = (process.env.APP_ENV ?? "local") === "local";
-const runtime = createTelemetryRuntime({
+export const runtime = createTelemetryRuntime({
   service: "outbox-worker",
   environment: process.env.APP_ENV ?? "local",
   otlpEndpoint: process.env.PIRH_OTLP_ENDPOINT,
@@ -71,6 +71,7 @@ for (const signal of ["SIGINT", "SIGTERM"] as const)
   });
 
 const scheduler = local ? undefined : new SchedulerClient({ region });
+type OutboxRecord = Parameters<typeof outboxQueueMessage>[0];
 async function scheduleLongDelay(
   message: NonNullable<ReturnType<typeof outboxQueueMessage>>,
 ) {
@@ -107,68 +108,108 @@ async function scheduleLongDelay(
     }),
   );
 }
-export async function publish(
-  record: Awaited<ReturnType<typeof persistence.getUnpublished>>[number],
-) {
-  return withExtractedTrace(
-    record.traceparent,
-    "outbox.publish",
-    { kind: record.kind },
-    async () => {
-      try {
-        if (record.kind === "SCHEDULE_DELIVERY") {
-          const message = outboxQueueMessage(record);
-          if (message === undefined) return;
-          const notBefore = new Date(String(record.payload.notBefore));
-          const delay = Math.max(
-            0,
-            Math.ceil((notBefore.getTime() - Date.now()) / 1_000),
-          );
-          if (delay > 900) {
-            if (local) await persistence.materializeScheduledWork(record);
-            else await scheduleLongDelay(message);
-            await persistence.markPublished(record, new Date());
+
+type OutboxPublisherDependencies = {
+  readonly persistence: Pick<
+    DynamoPersistence,
+    "markPublished" | "recordPublicationFailure" | "materializeScheduledWork"
+  >;
+  readonly routing: Pick<ElasticMqQueue, "publish">;
+  readonly delivery: Pick<ElasticMqQueue, "publish">;
+  readonly local: boolean;
+  readonly scheduleLongDelay: (
+    message: NonNullable<ReturnType<typeof outboxQueueMessage>>,
+  ) => Promise<void>;
+  readonly now: () => Date;
+  readonly telemetry: Pick<typeof runtime.telemetry, "count" | "duration">;
+  readonly logger: Pick<typeof runtime.logger, "info" | "error">;
+};
+
+/**
+ * Import-safe outbox publisher. The queue and persistence boundary is injected
+ * so resilience tests can deterministically exercise the send/commit crash
+ * window without adding a production fault control.
+ */
+export function createOutboxPublisher(input: OutboxPublisherDependencies) {
+  return async (record: OutboxRecord): Promise<void> =>
+    withExtractedTrace(
+      record.traceparent,
+      "outbox.publish",
+      { kind: record.kind },
+      async () => {
+        try {
+          if (record.kind === "SCHEDULE_DELIVERY") {
+            const message = outboxQueueMessage(record);
+            if (message === undefined) return;
+            const delay = Math.max(
+              0,
+              Math.ceil(
+                (new Date(String(record.payload.notBefore)).getTime() -
+                  input.now().getTime()) /
+                  1_000,
+              ),
+            );
+            if (delay > 900) {
+              if (input.local)
+                await input.persistence.materializeScheduledWork(record);
+              else await input.scheduleLongDelay(message);
+            } else
+              await input.delivery.publish({
+                body: message as never,
+                delaySeconds: delay,
+                traceparent: record.traceparent,
+              });
+            await input.persistence.markPublished(record, input.now());
             return;
           }
-          await delivery.publish({
+          const message = outboxQueueMessage(record);
+          if (message === undefined) return;
+          await (
+            record.kind === "ROUTE_EVENT" ? input.routing : input.delivery
+          ).publish({
             body: message as never,
-            delaySeconds: delay,
             traceparent: record.traceparent,
           });
-          await persistence.markPublished(record, new Date());
-          return;
+          await input.persistence.markPublished(record, input.now());
+          input.telemetry.count("outbox.published");
+          input.telemetry.duration(
+            "outbox.age",
+            input.now().getTime() - new Date(record.createdAt).getTime(),
+          );
+          input.logger.info("Outbox published", {
+            event: "outbox.published",
+            correlationId: message.correlationId,
+            eventId: message.eventId,
+            deliveryId:
+              "deliveryId" in message ? message.deliveryId : undefined,
+            tenantId: record.tenantId,
+          });
+        } catch (error) {
+          await input.persistence.recordPublicationFailure(record, input.now());
+          input.telemetry.count("outbox.publication_failure");
+          input.logger.error("Outbox publication failed", {
+            event: "outbox.publish_failed",
+            outboxId: record.outboxId,
+            tenantId: record.tenantId,
+            error,
+          });
         }
-        const message = outboxQueueMessage(record);
-        if (message === undefined) return;
-        await (record.kind === "ROUTE_EVENT" ? routing : delivery).publish({
-          body: message as never,
-          traceparent: record.traceparent,
-        });
-        await persistence.markPublished(record, new Date());
-        runtime.telemetry.count("outbox.published");
-        runtime.telemetry.duration(
-          "outbox.age",
-          Date.now() - new Date(record.createdAt).getTime(),
-        );
-        runtime.logger.info("Outbox published", {
-          event: "outbox.published",
-          correlationId: message.correlationId,
-          eventId: message.eventId,
-          deliveryId: "deliveryId" in message ? message.deliveryId : undefined,
-          tenantId: record.tenantId,
-        });
-      } catch (error) {
-        await persistence.recordPublicationFailure(record, new Date());
-        runtime.telemetry.count("outbox.publication_failure");
-        runtime.logger.error("Outbox publication failed", {
-          event: "outbox.publish_failed",
-          outboxId: record.outboxId,
-          tenantId: record.tenantId,
-          error,
-        });
-      }
-    },
-  );
+      },
+    );
+}
+
+const publisher = createOutboxPublisher({
+  persistence,
+  routing,
+  delivery,
+  local,
+  scheduleLongDelay,
+  now: () => new Date(),
+  telemetry: runtime.telemetry,
+  logger: runtime.logger,
+});
+export async function publish(record: OutboxRecord) {
+  return publisher(record);
 }
 export async function tick() {
   for (

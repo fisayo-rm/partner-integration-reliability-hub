@@ -129,6 +129,51 @@ test("M08 console login, role gate, API redaction, and tenant boundary", async (
     `/api/v1/events/${original.eventId}`,
   );
   expect(crossTenant.status).toBe(404);
+  const eventBeforeReplay = await request(
+    admin,
+    `/api/v1/events/${original.eventId}`,
+  );
+  const eventBeforeReplayBody = (await eventBeforeReplay.json()) as {
+    event?: unknown;
+    deliveries?: { deliveryId?: string }[];
+  };
+  const originalBeforeReplay = eventBeforeReplayBody.deliveries?.find(
+    (delivery) => delivery.deliveryId === original.deliveryId,
+  );
+  expect(originalBeforeReplay).toBeDefined();
+  await page.goto(`/deliveries/${original.deliveryId}`);
+  await expect(
+    page.getByRole("heading", { name: "Delivery detail" }),
+  ).toBeVisible();
+  await page.getByRole("button", { name: "Replay delivery" }).click();
+  await page
+    .getByLabel("Reason")
+    .fill("Partner endpoint recovered for M12 replay.");
+  const correction = page.getByLabel(/terminal condition was corrected/i);
+  if (await correction.isVisible()) await correction.check();
+  const replayResponse = page.waitForResponse(
+    (response) =>
+      response.url().includes(`/deliveries/${original.deliveryId}/replays`) &&
+      response.request().method() === "POST" &&
+      response.status() === 202,
+  );
+  await page.getByRole("button", { name: "Confirm replay" }).click();
+  await replayResponse;
+  await expect(page.getByText(/replay relationships/i)).toBeVisible();
+  const eventAfterReplay = await request(
+    admin,
+    `/api/v1/events/${original.eventId}`,
+  );
+  const eventAfterReplayBody = (await eventAfterReplay.json()) as {
+    event?: unknown;
+    deliveries?: { deliveryId?: string }[];
+  };
+  expect(eventAfterReplayBody.event).toEqual(eventBeforeReplayBody.event);
+  expect(
+    eventAfterReplayBody.deliveries?.find(
+      (delivery) => delivery.deliveryId === original.deliveryId,
+    ),
+  ).toEqual(originalBeforeReplay);
   const validation = await request(admin, "/api/v1/transformations/validate", {
     method: "POST",
     headers: { "content-type": "application/json" },

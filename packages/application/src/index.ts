@@ -398,6 +398,8 @@ export interface DeliveryConcurrencyRepository {
     readonly eventId: EventId;
     readonly deliveryId: DeliveryExecution["deliveryId"];
     readonly now: Date;
+    /** Recovery must use injected entropy so its retry schedule is testable. */
+    readonly random: number;
   }): Promise<boolean>;
   acquireRatePermit(input: {
     readonly context: TenantContext;
@@ -1737,6 +1739,7 @@ export class DeliveryService {
         eventId: input.eventId,
         deliveryId: input.deliveryId,
         now,
+        random: this.dependencies.random?.next() ?? Math.random(),
       });
       return { acknowledge: true };
     }

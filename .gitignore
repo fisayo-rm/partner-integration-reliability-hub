@@ -10,6 +10,10 @@ cdk.out/
 infrastructure/cdk/cdk.out/
 *.tsbuildinfo
 *.pirh-plan.json
+artifacts/
+backups/
+restore-artifacts/
+load-artifacts/
 
 # Local configuration and operating-system metadata
 .env

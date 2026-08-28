@@ -51,6 +51,7 @@ import {
   deriveEventStatus,
   isTerminalDeliveryState,
   rateLimitDecision,
+  retryDelaySeconds,
   transitionDelivery,
 } from "@pirh/domain";
 import { key, stableShard } from "./keys.js";
@@ -3162,6 +3163,104 @@ export class DynamoPersistence
       new Date(delivery.leaseExpiresAt).getTime() > input.now.getTime()
     )
       return false;
+    if (delivery.activeAttemptId !== undefined) {
+      const started = await this.getCore<DeliveryAttempt>(
+        key.attempt(
+          input.context.tenantId,
+          input.eventId,
+          delivery.deliveryId,
+          delivery.attemptCount,
+        ),
+      );
+      // The delivery's active id and the immutable started record must agree.
+      // If they do not, a concurrent finalizer has already won or the record is
+      // corrupt; the finalizer's condition remains the source of truth.
+      if (
+        started === undefined ||
+        started.attemptId !== delivery.activeAttemptId
+      )
+        return false;
+      const delay = retryDelaySeconds({
+        policy: delivery.configSnapshot.retryPolicy,
+        attemptNumber: delivery.attemptCount,
+        random: input.random,
+      });
+      const exhausted = delivery.attemptCount >= delivery.maxAttempts;
+      const state = exhausted ? "dead_lettered" : "retry_scheduled";
+      const nextEligibleAt = new Date(
+        input.now.getTime() + Math.ceil(delay * 1_000),
+      );
+      const finalDelivery = transitionDelivery(delivery, {
+        to: state,
+        at: input.now.toISOString() as never,
+        expectedVersion: delivery.version,
+        leaseToken: delivery.leaseToken ?? ("expired-lease" as never),
+        ...(exhausted
+          ? {}
+          : { nextEligibleAt: nextEligibleAt.toISOString() as never }),
+        blockedReason: "TIMEOUT",
+      });
+      const attempt: DeliveryAttempt = {
+        ...started,
+        completedAt: input.now.toISOString() as never,
+        durationMs: Math.max(
+          0,
+          input.now.getTime() - new Date(started.startedAt).getTime(),
+        ),
+        outcome: "failed",
+        failureCategory: "TIMEOUT",
+        retryable: true,
+      };
+      const history: DeliveryHistoryEntry = {
+        historyId: `recovery-${delivery.deliveryId}-${delivery.version}`,
+        deliveryId: delivery.deliveryId,
+        tenantId: delivery.tenantId,
+        correlationId: delivery.correlationId,
+        type: exhausted ? "dead_lettered" : "retry_scheduled",
+        occurredAt: input.now.toISOString() as never,
+        summary: exhausted
+          ? "Expired started delivery attempt exhausted retries."
+          : "Expired started delivery attempt recovered as timeout.",
+        metadata: {
+          failureCategory: "TIMEOUT",
+          ...(exhausted
+            ? {}
+            : { nextEligibleAt: nextEligibleAt.toISOString() }),
+        },
+        expiresAt: delivery.expiresAt,
+      };
+      const outbox: OutboxRecord | undefined = exhausted
+        ? undefined
+        : {
+            outboxId:
+              `obx_recovery_${delivery.deliveryId}_${delivery.version}` as never,
+            kind: "SCHEDULE_DELIVERY",
+            tenantId: delivery.tenantId,
+            aggregateType: "DELIVERY",
+            aggregateId: delivery.deliveryId,
+            target: "SCHEDULER",
+            payload: {
+              eventId: delivery.eventId,
+              deliveryId: delivery.deliveryId,
+              correlationId: delivery.correlationId,
+              notBefore: nextEligibleAt.toISOString(),
+              cause: "RETRY",
+            },
+            createdAt: input.now.toISOString() as never,
+            attempts: 0,
+            schemaVersion: 1,
+          };
+      return this.finalizeAttempt({
+        context: input.context,
+        eventId: delivery.eventId,
+        delivery: finalDelivery,
+        expectedVersion: delivery.version,
+        leaseToken: delivery.leaseToken ?? ("expired-lease" as never),
+        attempt,
+        history,
+        ...(outbox === undefined ? {} : { outbox }),
+      });
+    }
     const next = transitionDelivery(delivery, {
       to: "scheduled",
       at: input.now.toISOString() as never,

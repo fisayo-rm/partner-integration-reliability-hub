@@ -17,7 +17,7 @@ import { executeTransformation } from "@pirh/transformation";
 
 const region = process.env.AWS_REGION ?? "us-east-1";
 const local = (process.env.APP_ENV ?? "local") === "local";
-const runtime = createTelemetryRuntime({
+export const runtime = createTelemetryRuntime({
   service: "router-worker",
   environment: process.env.APP_ENV ?? "local",
   otlpEndpoint: process.env.PIRH_OTLP_ENDPOINT,

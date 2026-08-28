@@ -29,6 +29,7 @@
     "local:verify": "node scripts/verify-local-platform.mjs",
     "local:verify:default": "node scripts/verify-local-platform.mjs default",
     "local:verify:observability": "node scripts/verify-local-platform.mjs observability",
+    "local:verify:deep": "PIRH_RUN_M12_LOAD=1 node scripts/verify-local-platform.mjs default",
     "demo:m04": "node scripts/demo-m04.mjs",
     "demo:m05": "node scripts/demo-m05.mjs",
     "demo:m06": "node scripts/demo-m06.mjs",
@@ -47,6 +48,11 @@
     "wrangler": "wrangler",
     "config": "pnpm --filter @pirh/config-cli... build && node apps/config-cli/dist/index.js",
     "config:verify": "vitest run tests/config-portability.test.ts",
+    "load:run": "docker compose --env-file .env.local --profile load run --rm k6",
+    "acceptance:validate": "node scripts/validate-acceptance-matrix.mjs",
+    "ops:backup": "pnpm --filter @pirh/ops-cli... build && node apps/ops-cli/dist/index.js backup",
+    "ops:restore": "pnpm --filter @pirh/ops-cli... build && node apps/ops-cli/dist/index.js restore",
+    "restore:drill": "node scripts/restore-drill.mjs",
     "verify": "pnpm format:check && pnpm lint && pnpm typecheck && pnpm test:typecheck && pnpm architecture && pnpm test && pnpm test:security && pnpm config:verify && pnpm build && pnpm secret:scan && pnpm audit"
   },
   "devDependencies": {
@@ -86,6 +92,7 @@
     "@opentelemetry/sdk-logs": "^0.221.0",
     "@opentelemetry/sdk-metrics": "^2.10.0",
     "@opentelemetry/sdk-node": "^0.221.0",
+    "@opentelemetry/sdk-trace-base": "^2.10.0",
     "@opentelemetry/semantic-conventions": "^1.43.0",
     "pino": "^10.3.1"
   }

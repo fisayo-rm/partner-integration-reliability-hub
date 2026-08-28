@@ -90,6 +90,7 @@ export async function createApiDependencies(
   } = {},
 ): Promise<{
   readonly dependencies: ApiDependencies;
+  readonly flush: () => Promise<void>;
   readonly shutdown: () => Promise<void>;
 }> {
   if (input.localProcess === true)
@@ -265,6 +266,7 @@ export async function createApiDependencies(
         .map((value) => value.trim())
         .filter(Boolean),
     },
+    flush: () => runtime.flush(),
     shutdown: () => runtime.shutdown(),
   };
 }

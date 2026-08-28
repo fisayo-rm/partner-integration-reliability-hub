@@ -17,6 +17,7 @@ import {
 } from "@opentelemetry/sdk-logs";
 import { PeriodicExportingMetricReader } from "@opentelemetry/sdk-metrics";
 import { NodeSDK } from "@opentelemetry/sdk-node";
+import { BatchSpanProcessor } from "@opentelemetry/sdk-trace-base";
 import type { Telemetry } from "@pirh/application";
 import { redactError, redactUnknown, tenantSafeId } from "@pirh/redaction";
 import pino, { type Logger as PinoLogger } from "pino";
@@ -33,6 +34,8 @@ export interface RuntimeLogger {
 export interface TelemetryRuntime {
   readonly telemetry: Telemetry;
   readonly logger: RuntimeLogger;
+  /** Flushes buffered telemetry without closing the reusable Lambda runtime. */
+  flush(): Promise<void>;
   shutdown(): Promise<void>;
 }
 function hashId(prefix: string, value: string): string {
@@ -180,18 +183,27 @@ export function createTelemetryRuntime(input: {
     "deployment.environment.name": input.environment,
   });
   const endpoint = input.otlpEndpoint?.replace(/\/$/, "");
+  const spanProcessor =
+    endpoint === undefined || endpoint.length === 0
+      ? undefined
+      : new BatchSpanProcessor(
+          new OTLPTraceExporter({ url: `${endpoint}/v1/traces` }),
+          { scheduledDelayMillis: 500 },
+        );
+  const metricReader =
+    endpoint === undefined || endpoint.length === 0
+      ? undefined
+      : new PeriodicExportingMetricReader({
+          exporter: new OTLPMetricExporter({ url: `${endpoint}/v1/metrics` }),
+          exportIntervalMillis: 1_000,
+        });
   const sdk =
     endpoint === undefined || endpoint.length === 0
       ? undefined
       : new NodeSDK({
           resource,
-          traceExporter: new OTLPTraceExporter({
-            url: `${endpoint}/v1/traces`,
-          }),
-          metricReader: new PeriodicExportingMetricReader({
-            exporter: new OTLPMetricExporter({ url: `${endpoint}/v1/metrics` }),
-            exportIntervalMillis: 1_000,
-          }),
+          spanProcessors: spanProcessor === undefined ? [] : [spanProcessor],
+          ...(metricReader === undefined ? {} : { metricReader }),
         });
   sdk?.start();
   const logProvider =
@@ -251,6 +263,15 @@ export function createTelemetryRuntime(input: {
   return {
     telemetry,
     logger,
+    async flush() {
+      await Promise.all(
+        [
+          spanProcessor?.forceFlush(),
+          metricReader?.forceFlush(),
+          logProvider?.forceFlush(),
+        ].filter((value): value is Promise<void> => value !== undefined),
+      );
+    },
     async shutdown() {
       await Promise.all(
         [sdk?.shutdown(), logProvider?.shutdown()].filter(Boolean),

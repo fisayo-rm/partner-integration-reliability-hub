@@ -14,6 +14,7 @@
     { "path": "./packages/observability" },
     { "path": "./packages/config" },
     { "path": "./packages/config-portability" },
+    { "path": "./packages/recovery" },
     { "path": "./packages/test-support" },
     { "path": "./apps/api" },
     { "path": "./apps/console" },
@@ -24,6 +25,7 @@
     { "path": "./apps/mock-partner-alpha" },
     { "path": "./apps/mock-partner-beta" },
     { "path": "./apps/config-cli" },
+    { "path": "./apps/ops-cli" },
     { "path": "./infrastructure/cdk" }
   ]
 }

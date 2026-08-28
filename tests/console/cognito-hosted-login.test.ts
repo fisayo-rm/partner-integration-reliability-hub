@@ -36,3 +36,15 @@ test("hosted smoke signs in through Cognito instead of forging browser storage",
   expect(source).toContain("form#primary-form button[type=submit]");
   expect(source).not.toContain("addInitScript");
 });
+
+test("hosted smoke requires protected runner injection and does not read plaintext parameters", async () => {
+  const source = await readFile(
+    new URL("../../scripts/smoke-hosted.mjs", import.meta.url),
+    "utf8",
+  );
+  expect(source).toContain("HOSTED_PRODUCER_SECRET");
+  expect(source).toContain("HOSTED_MOCK_CONTROL_TOKEN");
+  expect(source).not.toContain("@aws-sdk/client-ssm");
+  expect(source).not.toContain("GetParameterCommand");
+  expect(source).not.toContain("WithDecryption");
+});

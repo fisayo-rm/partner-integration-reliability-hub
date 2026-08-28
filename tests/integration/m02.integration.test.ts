@@ -368,8 +368,14 @@ test("event/idempotency/outbox persistence is atomic and duplicate-safe", async 
     responseStatus: 202,
     outbox,
   };
-  expect((await persistence.accept(input)).kind).toBe("accepted");
-  expect((await persistence.accept(input)).kind).toBe("duplicate");
+  const simultaneous = await Promise.all([
+    persistence.accept(input),
+    persistence.accept(input),
+  ]);
+  expect(simultaneous.map((result) => result.kind).sort()).toEqual([
+    "accepted",
+    "duplicate",
+  ]);
   expect(
     (await persistence.accept({ ...input, requestBodyHash: "other" })).kind,
   ).toBe("conflict");

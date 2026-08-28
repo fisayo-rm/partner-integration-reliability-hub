@@ -19,6 +19,8 @@ jobs:
       - uses: actions/setup-node@v5
         with: { node-version: 24, cache: pnpm }
       - run: pnpm install --frozen-lockfile
+      - name: Install Playwright Chromium
+        run: pnpm exec playwright install --with-deps chromium
       - name: Run M12 engineering and acceptance checks
         run: pnpm verify && pnpm acceptance:validate
       - name: Synthesize hosted and hybrid infrastructure
